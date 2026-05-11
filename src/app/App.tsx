@@ -98,12 +98,7 @@ export default function App() {
         </button>
       </div>
 
-      {/* Footer */}
-      <div className="text-center text-white/40 text-[7px] relative z-10 leading-relaxed">
-        <p>University of</p>
-        <p>Southeastern Philippines</p>
-        <p className="mt-2">ICE 323 • May 2026</p>
-      </div>
+     
     </div>
   );
 }
