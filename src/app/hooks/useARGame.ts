@@ -1,5 +1,27 @@
 import { useRef, useState, useCallback, useEffect } from 'react';
 import * as THREE from 'three';
+import {
+  pickRandomWord, pickDropLetter, scoreGuess,
+  type LetterColor,
+} from '../data/wardenCodex';
+// GLB assets — Vite resolves these to URL strings at build time
+import asteroidUrl          from '../../3dmodel/asteroid.glb?url';
+import asteroid01Url        from '../../3dmodel/asteroid_01.glb?url';
+import asteroidLowPolyUrl   from '../../3dmodel/asteroid_low_poly.glb?url';
+import yorpAsteroidUrl      from '../../3dmodel/54509-yorp_asteroid_potential_earth_impactor.glb?url';
+import metalAsteroidUrl     from '../../3dmodel/metal_asteroid.glb?url';
+import giantPurpleAUrl      from '../../3dmodel/giant_asteroid_with_purple_accents.glb?url';
+import giantPurpleBUrl      from '../../3dmodel/giant_asteroid_with_purple_accents (1).glb?url';
+
+const ASTEROID_MODEL_URLS = [
+  asteroidUrl,
+  asteroid01Url,
+  asteroidLowPolyUrl,
+  yorpAsteroidUrl,
+  metalAsteroidUrl,
+  giantPurpleAUrl,
+  giantPurpleBUrl,
+];
 
 // ── Types ────────────────────────────────────────────────────────────────────
 export type GamePhase =
@@ -58,6 +80,18 @@ export interface UseARGameResult {
   isSupported: boolean;
   paused:      boolean;
   showPlane:   boolean;
+  // Wordle state
+  targetWord:        string;
+  collectedLetters:  string[];
+  currentGuess:      string;
+  attempts:          Array<{ word: string; colors: LetterColor[] }>;
+  wordsSolved:       number;
+  lastResult:        'win' | 'lose' | null;
+  // Wordle actions
+  addLetterToGuess: (letter: string) => void;
+  backspaceGuess:   () => void;
+  submitGuess:      () => void;
+  newWordRound:     () => void;
   startAR:     (overlayEl?: HTMLElement) => Promise<void>;
   startGame:   () => Promise<void>;
   stopAR:      () => void;
@@ -68,6 +102,7 @@ export interface UseARGameResult {
 
 // ── Tunables ─────────────────────────────────────────────────────────────────
 const WAVE_INITIAL_COUNT    = 3;       // simultaneous asteroids (was 8 — lag fix)
+const ASTEROID_POOL_SIZE    = 6;       // pre-built pool: 3 active + 3 spare (zero alloc mid-game)
 const RESPAWN_DELAY_MS      = 2500;   // new asteroid appears after a kill
 const SPAWN_RADIUS_MIN      = 0.55;
 const SPAWN_RADIUS_MAX      = 1.10;
@@ -89,8 +124,7 @@ const ATTACK_ACCEL          = 0.00075;          // acceleration toward player
 const MAX_SPEED             = 0.022;            // m/frame (~1.3 m/s @ 60fps)
 const CURVE_FORCE           = 0.00055;
 
-const FBX_PATH              = '/models/asteroid.fbx';
-const TEXTURE_BASE          = '/models/1K/';
+// (Old FBX + 1K texture pipeline removed — now using single low-poly GLB)
 
 // ─────────────────────────────────────────────────────────────────────────────
 export function useARGame(): UseARGameResult {
@@ -102,6 +136,18 @@ export function useARGame(): UseARGameResult {
   const [errorMsg,   setErrorMsg]   = useState('');
   const [paused,     setPausedState] = useState(false);
   const [showPlane,  setShowPlaneState] = useState(true);
+
+  // ── Wordle state ──
+  const [targetWord,       setTargetWord]       = useState<string>(() => pickRandomWord());
+  const [collectedLetters, setCollectedLetters] = useState<string[]>([]);
+  const [currentGuess,     setCurrentGuess]     = useState<string>('');
+  const [attempts,         setAttempts]         = useState<Array<{ word: string; colors: LetterColor[] }>>([]);
+  const [wordsSolved,      setWordsSolved]      = useState(0);
+  const [lastResult,       setLastResult]       = useState<'win' | 'lose' | null>(null);
+
+  const targetWordRef       = useRef<string>('');
+  const collectedLettersRef = useRef<string[]>([]);
+  useEffect(() => { targetWordRef.current = targetWord; }, [targetWord]);
 
   const pausedRef     = useRef(false);
   const showPlaneRef  = useRef(true);
@@ -119,10 +165,18 @@ export function useARGame(): UseARGameResult {
   const cameraRef           = useRef<THREE.PerspectiveCamera | null>(null);
   const sessionRef          = useRef<any>(null);
   const refSpaceRef         = useRef<any>(null);
-  const asteroidTemplateRef = useRef<THREE.Object3D | null>(null);
-  const templateMaxDimRef   = useRef(1);
+  const asteroidTemplatesRef = useRef<THREE.Object3D[]>([]);   // pool of rock-mesh templates (picked randomly per spawn)
   const asteroidsRef        = useRef<GameAsteroid[]>([]);
+  const asteroidPoolRef     = useRef<GameAsteroid[]>([]);   // ALL preallocated instances (active + spare)
   const particlesRef        = useRef<ParticleSystem[]>([]);
+  // Letter drop sprites (each asteroid kill spawns one)
+  const letterDropsRef      = useRef<Array<{
+    sprite:   THREE.Sprite;
+    velocity: THREE.Vector3;
+    letter:   string;
+    life:     number;
+    maxLife:  number;
+  }>>([]);
   const trackedPlanesRef    = useRef<Map<any, TrackedPlane>>(new Map());
   const planeMeshesRef      = useRef<Map<any, { outline: THREE.LineLoop; fill: THREE.Mesh }>>(new Map());
   const bestPlaneRef        = useRef<TrackedPlane | null>(null);
@@ -159,88 +213,268 @@ export function useARGame(): UseARGameResult {
     return group;
   };
 
-  // 3. FBX + PBR textures -----------------------------------------------------
-  const loadAsteroidModel = async (): Promise<THREE.Object3D> => {
+  // 3. GLB (asteroids) --------------------------------------------------------
+  // Loads ALL asteroid GLB variants in parallel; every mesh found becomes a
+  // separate template, picked randomly per spawn for maximum visual variety.
+  // Individual GLB failures are tolerated — we just skip and continue.
+  const loadAsteroidModels = async (): Promise<THREE.Object3D[]> => {
     try {
-      const { FBXLoader } = await import('three/examples/jsm/loaders/FBXLoader.js');
+      const { GLTFLoader } = await import('three/examples/jsm/loaders/GLTFLoader.js');
+      const loader = new GLTFLoader();
 
-      const manager = new THREE.LoadingManager();
-      manager.setURLModifier((url) => {
-        const file = url.split('/').pop();
-        return file ? TEXTURE_BASE + file : url;
-      });
+      const results = await Promise.allSettled(
+        ASTEROID_MODEL_URLS.map(url => loader.loadAsync(url))
+      );
 
-      const texLoader = new THREE.TextureLoader(manager);
-      const [colorMap, roughMap, metalMap, normalMap, aoMap] = await Promise.all([
-        texLoader.loadAsync(TEXTURE_BASE + 'Asteroid1d_Color_1K.png'),
-        texLoader.loadAsync(TEXTURE_BASE + 'Asteroid1d_Roughness_1K.png'),
-        texLoader.loadAsync(TEXTURE_BASE + 'Asteroid1d_Metalness_1K.png'),
-        texLoader.loadAsync(TEXTURE_BASE + 'Asteroid1d_NormalOpenGL_1K.png'),
-        texLoader.loadAsync(TEXTURE_BASE + 'Asteroid1d_AO_1K.png'),
-      ]);
-
-      colorMap.colorSpace = THREE.SRGBColorSpace;
-      [colorMap, roughMap, metalMap, normalMap, aoMap].forEach(t => {
-        t.flipY = false;
-        t.anisotropy = 8;
-      });
-
-      const pbr = new THREE.MeshStandardMaterial({
-        map: colorMap, roughnessMap: roughMap, metalnessMap: metalMap,
-        normalMap, aoMap,
-        roughness: 1, metalness: 0.6,
-      });
-
-      const loader = new FBXLoader(manager);
-      return await new Promise<THREE.Object3D>((resolve, reject) => {
-        loader.load(FBX_PATH, (fbx) => {
-          fbx.traverse((c) => {
-            const mesh = c as THREE.Mesh;
-            if (mesh.isMesh) {
-              mesh.material = pbr;
-              const geom = mesh.geometry as THREE.BufferGeometry;
-              if (geom?.attributes?.uv && !geom.attributes.uv2) {
-                geom.setAttribute('uv2', geom.attributes.uv);
-              }
+      const rocks: THREE.Object3D[] = [];
+      results.forEach(res => {
+        if (res.status !== 'fulfilled') return;
+        res.value.scene.traverse((c) => {
+          const mesh = c as THREE.Mesh;
+          if (mesh.isMesh) {
+            mesh.position.set(0, 0, 0);
+            mesh.rotation.set(0, 0, 0);
+            mesh.scale.setScalar(1);
+            if (!mesh.material) {
+              mesh.material = new THREE.MeshStandardMaterial({
+                color: 0x8a8579, roughness: 0.95, metalness: 0.05,
+              });
             }
-          });
-          resolve(fbx);
-        }, undefined, reject);
+            rocks.push(mesh);
+          }
+        });
       });
+
+      if (rocks.length === 0) return [buildFallbackAsteroid()];
+      return rocks;
     } catch {
-      return buildFallbackAsteroid();
+      return [buildFallbackAsteroid()];
     }
   };
 
-  // 4. Particle burst ---------------------------------------------------------
-  const spawnParticles = (position: THREE.Vector3, color = 0xf97316, count = 26) => {
+  // 4. Particle burst / trail ------------------------------------------------
+  // mode='burst' → outward+up explosion (smash). mode='trail' → small falling embers (attack trail).
+  const spawnParticles = (
+    position: THREE.Vector3,
+    color = 0xf97316,
+    count = 26,
+    mode: 'burst' | 'trail' = 'burst',
+  ) => {
+    const scene = sceneRef.current;
+    if (!scene) return;
+    const geom = new THREE.BufferGeometry();
+    const pos  = new Float32Array(count * 3);
+    const vels: THREE.Vector3[] = [];
+    const isBurst = mode === 'burst';
+    for (let i = 0; i < count; i++) {
+      pos[i*3]=position.x; pos[i*3+1]=position.y; pos[i*3+2]=position.z;
+      if (isBurst) {
+        vels.push(new THREE.Vector3(
+          (Math.random()-0.5)*0.04,
+          0.012+Math.random()*0.022,
+          (Math.random()-0.5)*0.04,
+        ));
+      } else {
+        // Trail: tiny lateral drift + slow fall
+        vels.push(new THREE.Vector3(
+          (Math.random()-0.5)*0.015,
+          -0.002 - Math.random()*0.006,
+          (Math.random()-0.5)*0.015,
+        ));
+      }
+    }
+    geom.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    const points = new THREE.Points(geom, new THREE.PointsMaterial({
+      color,
+      size:        isBurst ? 0.03 : 0.018,
+      transparent: true,
+      opacity:     1,
+    }));
+    scene.add(points);
+    particlesRef.current.push({ points, velocities: vels, frame: 0, life: isBurst ? 55 : 28 });
+  };
+
+  // 4z. Letter sprite (Canvas-based texture) -------------------------------
+  // Produces a small floating 3D label that always faces the camera. Used as
+  // the visible reward dropped when a player smashes an asteroid.
+  const makeLetterSprite = (letter: string): THREE.Sprite => {
+    const size = 128;
+    const canvas = document.createElement('canvas');
+    canvas.width = size; canvas.height = size;
+    const ctx = canvas.getContext('2d')!;
+    // Background (dark purple, slightly transparent)
+    ctx.fillStyle = 'rgba(10,1,24,0.78)';
+    ctx.fillRect(0, 0, size, size);
+    // Glowing border
+    ctx.strokeStyle = '#a78bfa';
+    ctx.lineWidth = 6;
+    ctx.strokeRect(6, 6, size - 12, size - 12);
+    // Letter
+    ctx.fillStyle = '#ec4899';
+    ctx.font = 'bold 78px "Press Start 2P", monospace';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(letter, size / 2, size / 2 + 4);
+
+    const tex = new THREE.CanvasTexture(canvas);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    tex.anisotropy = 4;
+    const mat = new THREE.SpriteMaterial({
+      map:         tex,
+      transparent: true,
+      depthWrite:  false,
+    });
+    const sprite = new THREE.Sprite(mat);
+    sprite.scale.set(0.10, 0.10, 0.10);
+    return sprite;
+  };
+
+  // Spawn a letter drop at a position (called from killAsteroid on player kill)
+  const spawnLetterDrop = (position: THREE.Vector3) => {
+    const scene = sceneRef.current;
+    if (!scene) return;
+    const letter = pickDropLetter(targetWordRef.current);
+    const sprite = makeLetterSprite(letter);
+    sprite.position.copy(position);
+    scene.add(sprite);
+    letterDropsRef.current.push({
+      sprite,
+      letter,
+      velocity: new THREE.Vector3(
+        (Math.random() - 0.5) * 0.012,
+        0.018 + Math.random() * 0.010,    // initial upward burst
+        (Math.random() - 0.5) * 0.012,
+      ),
+      life:    0,
+      maxLife: 140,                          // ~2.3s @ 60fps
+    });
+  };
+
+  // Per-frame: integrate physics, auto-collect into inventory when life expires
+  const updateLetterDrops = () => {
+    const scene = sceneRef.current;
+    if (!scene) return;
+    const collectedThisFrame: string[] = [];
+    letterDropsRef.current = letterDropsRef.current.filter(d => {
+      d.life++;
+      d.velocity.y -= GRAVITY * 0.7;
+      d.velocity.multiplyScalar(0.992);
+      d.sprite.position.add(d.velocity);
+      // Subtle pulse on opacity for sparkle
+      (d.sprite.material as THREE.SpriteMaterial).opacity =
+        0.75 + 0.25 * Math.sin(d.life * 0.18);
+
+      if (d.life >= d.maxLife) {
+        // Auto-collect
+        collectedThisFrame.push(d.letter);
+        scene.remove(d.sprite);
+        (d.sprite.material as THREE.SpriteMaterial).map?.dispose();
+        (d.sprite.material as THREE.SpriteMaterial).dispose();
+        return false;
+      }
+      return true;
+    });
+    if (collectedThisFrame.length > 0) {
+      collectedLettersRef.current.push(...collectedThisFrame);
+      setCollectedLetters([...collectedLettersRef.current]);
+    }
+  };
+
+  // 4a. Dust emission — small dirty/rocky particles falling off drifting asteroids.
+  // Used in 'drift' state to make asteroids feel weathered and alive.
+  const spawnDust = (position: THREE.Vector3, count = 3) => {
     const scene = sceneRef.current;
     if (!scene) return;
     const geom = new THREE.BufferGeometry();
     const pos  = new Float32Array(count * 3);
     const vels: THREE.Vector3[] = [];
     for (let i = 0; i < count; i++) {
-      pos[i*3]=position.x; pos[i*3+1]=position.y; pos[i*3+2]=position.z;
+      // Slight offset around the asteroid (3-5 cm radius)
+      const offsetR = 0.025 + Math.random() * 0.025;
+      const offsetA = Math.random() * Math.PI * 2;
+      pos[i*3]   = position.x + Math.cos(offsetA) * offsetR;
+      pos[i*3+1] = position.y - 0.02 - Math.random() * 0.03;   // just below
+      pos[i*3+2] = position.z + Math.sin(offsetA) * offsetR;
+
+      // Gentle fall + minimal drift
       vels.push(new THREE.Vector3(
-        (Math.random()-0.5)*0.04,
-        0.012+Math.random()*0.022,
-        (Math.random()-0.5)*0.04,
+        (Math.random() - 0.5) * 0.004,
+        -0.001 - Math.random() * 0.003,
+        (Math.random() - 0.5) * 0.004,
       ));
     }
     geom.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-    const points = new THREE.Points(geom, new THREE.PointsMaterial({ color, size: 0.03, transparent: true, opacity: 1 }));
+
+    // Earthy dirt tones (gray-brown variation)
+    const r = Math.random();
+    const dustColor = r < 0.4 ? 0x6b5a3e : r < 0.75 ? 0x8a7860 : 0x5a4a36;
+
+    const points = new THREE.Points(geom, new THREE.PointsMaterial({
+      color:       dustColor,
+      size:        0.012,
+      transparent: true,
+      opacity:     0.7,
+      depthWrite:  false,
+    }));
     scene.add(points);
-    particlesRef.current.push({ points, velocities: vels, frame: 0, life: 55 });
+    particlesRef.current.push({ points, velocities: vels, frame: 0, life: 40 });
+  };
+
+  // 4b. Flame emission — used when asteroid is red (charging / attacking).
+  // Particles fly TOWARD the player (matching the asteroid's intent) with
+  // a slight upward bias so they look like rising fire.
+  const spawnFlame = (
+    position: THREE.Vector3,
+    toward: THREE.Vector3,    // unnormalized direction vector (asteroid → player)
+    count = 5,
+  ) => {
+    const scene = sceneRef.current;
+    if (!scene) return;
+    const dir = toward.clone();
+    if (dir.lengthSq() > 0.0001) dir.normalize(); else dir.set(0, 1, 0);
+
+    const geom = new THREE.BufferGeometry();
+    const pos  = new Float32Array(count * 3);
+    const vels: THREE.Vector3[] = [];
+    for (let i = 0; i < count; i++) {
+      pos[i*3]   = position.x;
+      pos[i*3+1] = position.y;
+      pos[i*3+2] = position.z;
+
+      // Base velocity toward player + random spread + slight heat-rise
+      const v = dir.clone().multiplyScalar(0.013 + Math.random() * 0.018);
+      v.x += (Math.random() - 0.5) * 0.010;
+      v.y += (Math.random() - 0.25) * 0.012;   // bias upward like fire
+      v.z += (Math.random() - 0.5) * 0.010;
+      vels.push(v);
+    }
+    geom.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+
+    // Random flame tint per puff: yellow / orange / deep red
+    const r = Math.random();
+    const flameColor = r < 0.33 ? 0xffd24a : r < 0.7 ? 0xff7a22 : 0xff3311;
+
+    const points = new THREE.Points(geom, new THREE.PointsMaterial({
+      color:       flameColor,
+      size:        0.032,
+      transparent: true,
+      opacity:     0.95,
+      depthWrite:  false,
+    }));
+    scene.add(points);
+    particlesRef.current.push({ points, velocities: vels, frame: 0, life: 22 });
   };
 
   // 5. Build a single asteroid instance ---------------------------------------
   const buildAsteroidInstance = (now: number): GameAsteroid | null => {
-    const template = asteroidTemplateRef.current;
-    const scene    = sceneRef.current;
-    const origin   = worldOriginRef.current;
-    if (!template || !scene || !origin) return null;
+    const templates = asteroidTemplatesRef.current;
+    const scene     = sceneRef.current;
+    const origin    = worldOriginRef.current;
+    if (templates.length === 0 || !scene || !origin) return null;
 
-    const clone = template.clone(true);
+    // Pick a random rock variant from the GLB
+    const template = templates[Math.floor(Math.random() * templates.length)];
+    const clone    = template.clone(true);
 
     // Clone material so each asteroid glows independently
     let baseMat: THREE.MeshStandardMaterial | null = null;
@@ -254,10 +488,12 @@ export function useARGame(): UseARGameResult {
     });
     if (!baseMat) return null;
 
-    // Auto-scale to realistic 20-35cm diameter based on FBX bounds
+    // Auto-scale to realistic 20-35cm diameter using THIS rock's bounding box
+    const box  = new THREE.Box3().setFromObject(clone);
+    const size = new THREE.Vector3(); box.getSize(size);
+    const maxDim = Math.max(size.x, size.y, size.z) || 1;
     const targetDiameter = 0.20 + Math.random() * 0.15;
-    const s = targetDiameter / templateMaxDimRef.current;
-    clone.scale.setScalar(s);
+    clone.scale.setScalar(targetDiameter / maxDim);
 
     // Pick a random point INSIDE the detected plane polygon (fallback: donut around origin)
     const planePt = samplePointOnPlane();
@@ -305,29 +541,87 @@ export function useARGame(): UseARGameResult {
     };
   };
 
-  // 6. Smash ------------------------------------------------------------------
+  // 5b. Recycle: reset a pool instance to a fresh state on the plane ---------
+  const resetAsteroid = (a: GameAsteroid, now: number): boolean => {
+    const planePt = samplePointOnPlane();
+    const origin  = worldOriginRef.current;
+    let height: number;
+
+    if (planePt) {
+      a.obj.position.set(planePt.x, planePt.y, planePt.z);
+      height = planePt.y;
+    } else if (origin) {
+      const angle  = Math.random() * Math.PI * 2;
+      const radius = SPAWN_RADIUS_MIN + Math.random() * (SPAWN_RADIUS_MAX - SPAWN_RADIUS_MIN);
+      height = origin.y + SPAWN_HEIGHT_BASE + Math.random() * SPAWN_HEIGHT_RANGE;
+      a.obj.position.set(
+        origin.x + Math.cos(angle) * radius,
+        height,
+        origin.z + Math.sin(angle) * radius,
+      );
+    } else {
+      return false;
+    }
+
+    a.obj.rotation.set(Math.random()*Math.PI, Math.random()*Math.PI, Math.random()*Math.PI);
+    a.obj.visible = true;
+
+    a.state      = 'drift';
+    a.velocity.set(0, 0, 0);
+    a.angularVel.set(
+      (Math.random()-0.5)*0.02,
+      (Math.random()-0.5)*0.024,
+      (Math.random()-0.5)*0.016,
+    );
+
+    const roll = Math.random();
+    a.behaviour = roll < 0.5 ? 'straight' : roll < 0.8 ? 'curve' : 'orbit-strike';
+
+    a.orbitCenter.copy(a.obj.position);
+    a.orbitAngle  = Math.random() * Math.PI * 2;
+    a.orbitRadius = 0.04 + Math.random() * 0.06;
+    a.spawnHeight = height;
+
+    a.nextAttackTime = now + MIN_ATTACK_DELAY_MS + Math.random()*(MAX_ATTACK_DELAY_MS - MIN_ATTACK_DELAY_MS);
+    a.stateTimer    = 0;
+    a.alive         = true;
+
+    a.baseMat.emissive.setHex(0x000000);
+    a.baseMat.emissiveIntensity = 0;
+    return true;
+  };
+
+  // 5c. Pull a free instance from the pool and activate it -------------------
+  const spawnFromPool = (now: number): boolean => {
+    const idle = asteroidPoolRef.current.find(a => !a.alive);
+    if (!idle) return false;
+    if (!resetAsteroid(idle, now)) return false;
+    asteroidsRef.current.push(idle);
+    return true;
+  };
+
+  // 6. Smash (recycle to pool, NOT scene.remove) -----------------------------
   const killAsteroid = (a: GameAsteroid, byPlayer: boolean) => {
-    const scene = sceneRef.current;
-    if (!scene || !a.alive) return;
+    if (!a.alive) return;
     a.alive = false;
     spawnParticles(a.obj.position.clone(), byPlayer ? 0xf97316 : 0xff2200);
-    scene.remove(a.obj);
+    a.obj.visible = false;        // hide instead of remove (kept in scene + pool)
     asteroidsRef.current = asteroidsRef.current.filter(x => x !== a);
 
     if (byPlayer) {
       smashedRef.current++;
       setSmashed(smashedRef.current);
+      // Drop a letter for the Wordle puzzle
+      spawnLetterDrop(a.obj.position.clone());
       if (smashedRef.current > 0 && smashedRef.current % WAVE_INITIAL_COUNT === 0) {
         setWave(w => w + 1);
       }
     }
 
-    // Respawn a replacement after delay (endless mode)
+    // Respawn from pool after delay (zero allocation)
     setTimeout(() => {
       if (phaseRef.current !== 'playing') return;
-      const now = performance.now();
-      const fresh = buildAsteroidInstance(now);
-      if (fresh) asteroidsRef.current.push(fresh);
+      spawnFromPool(performance.now());
     }, RESPAWN_DELAY_MS);
   };
 
@@ -564,7 +858,7 @@ export function useARGame(): UseARGameResult {
     }
     const camPos = camPosRef.current;
 
-    asteroidsRef.current.forEach(a => {
+    asteroidsRef.current.forEach((a, idx) => {
       // Always tumble
       a.obj.rotation.x += a.angularVel.x;
       a.obj.rotation.y += a.angularVel.y;
@@ -583,6 +877,12 @@ export function useARGame(): UseARGameResult {
         // Damp any leftover velocity
         a.velocity.multiplyScalar(0.9);
 
+        // Dirty/dusty particles falling off the asteroid every ~25 frames,
+        // staggered per-asteroid so they don't all puff at the same time.
+        if ((frameCountRef.current + idx * 7) % 25 === 0) {
+          spawnDust(a.obj.position, 2);
+        }
+
         if (now > a.nextAttackTime) {
           a.state        = 'charging';
           a.stateTimer   = now;
@@ -599,6 +899,11 @@ export function useARGame(): UseARGameResult {
         a.obj.position.x += (Math.random() - 0.5) * 0.004;
         a.obj.position.y += (Math.random() - 0.5) * 0.004;
         a.obj.position.z += (Math.random() - 0.5) * 0.004;
+        // Charge-up flames every ~5 frames (small puffs toward player)
+        if ((frameCountRef.current % 5) === 0) {
+          const toward = camPos.clone().sub(a.obj.position);
+          spawnFlame(a.obj.position, toward, 3);
+        }
 
         if (k >= 1) {
           // Initial impulse toward player
@@ -636,6 +941,13 @@ export function useARGame(): UseARGameResult {
 
         // Pulse emissive
         a.baseMat.emissiveIntensity = 0.6 + Math.sin(t * 22) * 0.4;
+
+        // Flame trail toward player while lunging (every 3 frames)
+        if ((frameCountRef.current % 3) === 0) {
+          // Note: a.velocity points toward the player while attacking, so we
+          // use it directly — flames stream forward in the direction of travel.
+          spawnFlame(a.obj.position, a.velocity, 6);
+        }
 
         // Hit check → damage
         if (dist < ATTACK_HIT_DIST) {
@@ -695,17 +1007,25 @@ export function useARGame(): UseARGameResult {
     originLockedRef.current = true;  // freeze origin for stable spawning
 
     try {
-      const template = await loadAsteroidModel();
-      asteroidTemplateRef.current = template;
-
-      const box  = new THREE.Box3().setFromObject(template);
-      const size = new THREE.Vector3(); box.getSize(size);
-      templateMaxDimRef.current = Math.max(size.x, size.y, size.z) || 1;
+      const templates = await loadAsteroidModels();
+      asteroidTemplatesRef.current = templates;
 
       const now = performance.now();
-      for (let i = 0; i < WAVE_INITIAL_COUNT; i++) {
+
+      // Build the FULL pool up front — all FBX clones + material clones happen
+      // during the loading screen, so gameplay is allocation-free.
+      for (let i = 0; i < ASTEROID_POOL_SIZE; i++) {
         const inst = buildAsteroidInstance(now);
-        if (inst) asteroidsRef.current.push(inst);
+        if (inst) {
+          inst.obj.visible = false;
+          inst.alive       = false;
+          asteroidPoolRef.current.push(inst);
+        }
+      }
+
+      // Activate the initial wave from the pool
+      for (let i = 0; i < WAVE_INITIAL_COUNT; i++) {
+        spawnFromPool(now);
       }
 
       document.addEventListener('touchstart', handleTap, { passive: true });
@@ -738,6 +1058,8 @@ export function useARGame(): UseARGameResult {
     sessionRef.current   = null;
     canvasRef.current?.remove();
     canvasRef.current    = null;
+    asteroidPoolRef.current.forEach(a => sceneRef.current?.remove(a.obj));
+    asteroidPoolRef.current = [];
     asteroidsRef.current = [];
     particlesRef.current = [];
     trackedPlanesRef.current.clear();
@@ -823,6 +1145,7 @@ export function useARGame(): UseARGameResult {
           const now = performance.now();
           const t   = now * 0.001;
           updateAsteroids(frame, refSpace, now, t);
+          updateLetterDrops();
           updateParticles(scene);
         }
 
@@ -834,6 +1157,8 @@ export function useARGame(): UseARGameResult {
         canvas.remove();
         canvasRef.current    = null;
         sessionRef.current   = null;
+        asteroidPoolRef.current.forEach(a => scene.remove(a.obj));
+        asteroidPoolRef.current = [];
         asteroidsRef.current = [];
         particlesRef.current = [];
         trackedPlanesRef.current.clear();
