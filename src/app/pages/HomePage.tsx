@@ -139,7 +139,7 @@ export default function HomePage() {
     })), []);
 
   return (
-    <div className="min-h-screen w-full max-w-md mx-auto bg-[#0a0118] flex flex-col items-center justify-between px-6 py-12 font-['Press_Start_2P',_monospace] relative overflow-hidden">
+    <div className="min-h-screen w-full max-w-md mx-auto bg-[#0a0118] flex flex-col items-center justify-between px-6 pt-6 pb-4 font-['Press_Start_2P',_monospace] relative overflow-hidden">
 
       <style>{`
         @keyframes twinkle {
@@ -309,95 +309,200 @@ export default function HomePage() {
         backgroundSize: '20px 20px'
       }}></div>
 
-      {/* Header Section */}
-      <div className="flex flex-col items-center mt-8 relative z-10">
-        <div
-          className="w-32 h-32 mb-6 relative border-4 border-[#8b5cf6] bg-[#1a0a2e] p-2"
-          style={{ imageRendering: 'pixelated', animation: 'iconGlow 4s ease-in-out infinite' }}
-        >
-          <ImageWithFallback
-            src={iconImage}
-            alt="AR Wordle Smasher Icon"
-            className="w-full h-full object-contain"
-            style={{ imageRendering: 'pixelated' }}
+      {/* ── Hero Block ── */}
+      <div className="flex flex-col items-center mt-4 relative z-10">
+        {/* Icon with rotating ring */}
+        <div className="relative w-36 h-36 mb-4 flex items-center justify-center">
+          {/* Outer rotating ring */}
+          <div
+            className="absolute inset-[-8px] border-2 border-[#8b5cf6]/40 pointer-events-none"
+            style={{
+              animation: 'ringRotate 20s linear infinite',
+              borderRadius: '2px',
+              clipPath: 'polygon(0 0, 30% 0, 30% 8%, 70% 8%, 70% 0, 100% 0, 100% 30%, 92% 30%, 92% 70%, 100% 70%, 100% 100%, 70% 100%, 70% 92%, 30% 92%, 30% 100%, 0 100%, 0 70%, 8% 70%, 8% 30%, 0 30%)',
+            }}
           />
+          {/* Inner icon frame */}
+          <div
+            className="w-32 h-32 relative border-4 border-[#8b5cf6] bg-[#1a0a2e] p-2"
+            style={{ imageRendering: 'pixelated', animation: 'iconGlow 4s ease-in-out infinite' }}
+          >
+            <ImageWithFallback
+              src={iconImage}
+              alt="AR Wordle Smasher Icon"
+              className="w-full h-full object-contain"
+              style={{ imageRendering: 'pixelated' }}
+            />
+            {/* Corner pixels */}
+            <div className="absolute -top-1 -left-1  w-2 h-2 bg-[#facc15] pointer-events-none" />
+            <div className="absolute -top-1 -right-1 w-2 h-2 bg-[#10b981] pointer-events-none" />
+            <div className="absolute -bottom-1 -left-1  w-2 h-2 bg-[#ec4899] pointer-events-none" />
+            <div className="absolute -bottom-1 -right-1 w-2 h-2 bg-[#60a5fa] pointer-events-none" />
+          </div>
         </div>
 
-        <h1 className="text-xl text-center mb-4 leading-relaxed tracking-wide">
-          <span className="text-[#10b981]">AR</span>{' '}
-          <span className="text-[#8b5cf6]">WORDLE</span>
-          <br />
-          <span className="text-[#ec4899]">SMASHER</span>
+        {/* Title */}
+        <h1
+          className="text-center mb-1 leading-[1.4] tracking-wide"
+          style={{ animation: 'titleEnter 0.6s 0.1s cubic-bezier(0.22, 1, 0.36, 1) both' }}
+        >
+          <span className="block text-[18px]">
+            <span className="text-[#10b981]" style={{ textShadow: '0 0 8px #10b98188' }}>AR</span>{' '}
+            <span className="text-[#8b5cf6]" style={{ textShadow: '0 0 8px #8b5cf688' }}>WORDLE</span>
+          </span>
+          <span className="block text-[22px] mt-1 text-[#ec4899]"
+            style={{ textShadow: '0 0 12px #ec489988, 0 0 24px #ec489944' }}>
+            SMASHER
+          </span>
         </h1>
 
-        <p className="text-[8px] text-[#a78bfa] text-center mb-2 tracking-wider uppercase leading-relaxed">
-          The Warden's Codex
-        </p>
+        {/* Sub-tag bracket line */}
+        <div className="flex items-center gap-2 mb-3 mt-1">
+          <span className="block w-6 h-px bg-[#a78bfa]/40" />
+          <p className="text-[7px] text-[#a78bfa] tracking-widest">THE WARDEN'S CODEX</p>
+          <span className="block w-6 h-px bg-[#a78bfa]/40" />
+        </div>
+
+        {/* Animated 5-tile demo — flips through Wordle reveal pattern */}
+        {(() => {
+          // BLAZE with sample colors (green, gray, yellow, gray, gray)
+          const demoWord  = 'BLAZE';
+          const demoTints = [
+            { bg: '#10b981', fg: '#0a0118' }, // green
+            { bg: '#374151', fg: '#9ca3af' }, // gray
+            { bg: '#facc15', fg: '#0a0118' }, // yellow
+            { bg: '#374151', fg: '#9ca3af' }, // gray
+            { bg: '#374151', fg: '#9ca3af' }, // gray
+          ];
+          return (
+            <div className="flex gap-1.5 mb-2">
+              {demoWord.split('').map((ch, i) => (
+                <div
+                  key={i}
+                  className="w-7 h-7 flex items-center justify-center border-2 text-[12px] font-bold"
+                  style={{
+                    backfaceVisibility: 'hidden',
+                    animation: `tileFlip 0.6s ${0.6 + i * 0.18}s cubic-bezier(0.22, 1, 0.36, 1) both`,
+                    ['--reveal-bg' as string]: demoTints[i].bg,
+                    ['--reveal-fg' as string]: demoTints[i].fg,
+                    backgroundColor: '#1a0a2e',
+                    borderColor:     '#8b5cf6',
+                    color:           '#facc15',
+                    boxShadow:       `0 0 6px ${demoTints[i].bg}55`,
+                  }}
+                >
+                  {ch}
+                </div>
+              ))}
+            </div>
+          );
+        })()}
       </div>
 
-      {/* Middle Content */}
-      <div className="flex flex-col items-center space-y-6 flex-grow justify-center relative z-10 w-full">
-        <div className="bg-[#1a0a2e] border-4 border-[#8b5cf6] p-4 w-full relative">
-          <div className="absolute top-0 left-0 w-2 h-2 bg-[#0a0118] pointer-events-none"></div>
-          <div className="absolute top-0 right-0 w-2 h-2 bg-[#0a0118] pointer-events-none"></div>
-          <div className="absolute bottom-0 left-0 w-2 h-2 bg-[#0a0118] pointer-events-none"></div>
-          <div className="absolute bottom-0 right-0 w-2 h-2 bg-[#0a0118] pointer-events-none"></div>
-
-          <p className="text-[9px] text-white/90 text-center leading-[16px]">
-            Smash meteors in AR, collect letters, and solve puzzles to defeat the{' '}
-            <span className="text-[#ec4899]">Rift Overlord</span>
+      {/* ── Tagline + Stats ── */}
+      <div className="flex flex-col items-center gap-3 flex-grow justify-center relative z-10 w-full">
+        {/* Bold tagline */}
+        <div className="text-center">
+          <p className="text-[12px] tracking-widest text-white">
+            <span className="text-[#ef4444]">SMASH</span>
+            <span className="text-white/40 mx-1.5">·</span>
+            <span className="text-[#facc15]">SOLVE</span>
+            <span className="text-white/40 mx-1.5">·</span>
+            <span className="text-[#10b981]">SURVIVE</span>
+          </p>
+          <p className="text-[7px] text-white/55 leading-[12px] mt-2 max-w-[280px] mx-auto">
+            Smash asteroids in AR, collect letters, break the seals before the{' '}
+            <span className="text-[#ec4899]">Rift Overlord</span> destroys you.
           </p>
         </div>
+
+        {/* Stats strip */}
+        <div className="grid grid-cols-3 gap-2 w-full max-w-xs">
+          {[
+            { label: 'SEALS',    value: '47',  color: '#10b981' },
+            { label: 'BOSS AT',  value: 'W·10', color: '#facc15' },
+            { label: 'OVERLORD', value: '×1',  color: '#ec4899' },
+          ].map(s => (
+            <div
+              key={s.label}
+              className="relative bg-[#1a0a2e] border-2 py-2 text-center"
+              style={{ borderColor: `${s.color}66` }}
+            >
+              <div className="absolute top-0 left-0  w-1.5 h-1.5 pointer-events-none" style={{ backgroundColor: s.color }} />
+              <div className="absolute top-0 right-0 w-1.5 h-1.5 pointer-events-none" style={{ backgroundColor: s.color }} />
+              <div className="absolute bottom-0 left-0  w-1.5 h-1.5 pointer-events-none" style={{ backgroundColor: s.color }} />
+              <div className="absolute bottom-0 right-0 w-1.5 h-1.5 pointer-events-none" style={{ backgroundColor: s.color }} />
+              <p
+                className="text-[11px] tracking-widest"
+                style={{ color: s.color, textShadow: `0 0 6px ${s.color}88` }}
+              >
+                {s.value}
+              </p>
+              <p className="text-[6px] text-white/40 tracking-widest mt-0.5">{s.label}</p>
+            </div>
+          ))}
+        </div>
       </div>
 
-      {/* CTA Section — z-30 so it sits above all decorative layers */}
-      <div className="w-full space-y-4 mb-8 relative z-30">
-        <button type="button" style={{ touchAction: 'manipulation' }}
+      {/* ── CTA Section ── z-30 above all decorative layers */}
+      <div className="w-full space-y-3 mb-3 relative z-30">
+        {/* Primary CTA — START MISSION */}
+        <button
+          type="button"
+          style={{ touchAction: 'manipulation', animation: 'ctaShimmer 2.6s ease-in-out infinite' }}
           onClick={() => navigate('/mission')}
-          className="w-full bg-[#8b5cf6] border-4 border-[#ec4899] text-white py-4 px-6 text-[10px] relative hover:bg-[#a78bfa] transition-colors active:translate-y-1"
+          className="w-full bg-[#8b5cf6] border-4 border-[#ec4899] text-white py-4 px-6 text-[11px] relative hover:bg-[#a78bfa] transition-colors active:translate-y-1 tracking-widest"
         >
-          <div className="absolute top-0 left-0 w-2 h-2 bg-[#0a0118] pointer-events-none"></div>
-          <div className="absolute top-0 right-0 w-2 h-2 bg-[#0a0118] pointer-events-none"></div>
-          <div className="absolute bottom-0 left-0 w-2 h-2 bg-[#0a0118] pointer-events-none"></div>
-          <div className="absolute bottom-0 right-0 w-2 h-2 bg-[#0a0118] pointer-events-none"></div>
-          &gt; START MISSION &lt;
+          <div className="absolute top-0 left-0 w-2 h-2 bg-[#0a0118] pointer-events-none" />
+          <div className="absolute top-0 right-0 w-2 h-2 bg-[#0a0118] pointer-events-none" />
+          <div className="absolute bottom-0 left-0 w-2 h-2 bg-[#0a0118] pointer-events-none" />
+          <div className="absolute bottom-0 right-0 w-2 h-2 bg-[#0a0118] pointer-events-none" />
+          <span className="inline-flex items-center gap-2 justify-center">
+            <span>▶</span>
+            <span>START MISSION</span>
+            <span>◀</span>
+          </span>
         </button>
 
-        <button type="button" style={{ touchAction: 'manipulation' }}
-          onClick={() => navigate('/codex')}
-          className="w-full bg-[#1a0a2e] border-4 border-[#10b981] text-[#10b981] py-3 px-6 text-[9px] relative hover:bg-[#2a1a3e] transition-colors active:translate-y-1"
-        >
-          <div className="absolute top-0 left-0 w-2 h-2 bg-[#0a0118] pointer-events-none"></div>
-          <div className="absolute top-0 right-0 w-2 h-2 bg-[#0a0118] pointer-events-none"></div>
-          <div className="absolute bottom-0 left-0 w-2 h-2 bg-[#0a0118] pointer-events-none"></div>
-          <div className="absolute bottom-0 right-0 w-2 h-2 bg-[#0a0118] pointer-events-none"></div>
-          &gt; CODEX DICTIONARY &lt;
-        </button>
-
-        <div className="grid grid-cols-2 gap-3">
-          <button type="button" style={{ touchAction: 'manipulation' }}
-            onClick={() => setShowSettings(true)}
-            className="bg-[#1a0a2e] border-4 border-[#facc15] text-[#facc15] py-3 px-2 text-[8px] relative hover:bg-[#2a1a3e] transition-colors active:translate-y-1 flex items-center justify-center gap-1.5"
-          >
-            <div className="absolute top-0 left-0 w-2 h-2 bg-[#0a0118] pointer-events-none"></div>
-            <div className="absolute top-0 right-0 w-2 h-2 bg-[#0a0118] pointer-events-none"></div>
-            <div className="absolute bottom-0 left-0 w-2 h-2 bg-[#0a0118] pointer-events-none"></div>
-            <div className="absolute bottom-0 right-0 w-2 h-2 bg-[#0a0118] pointer-events-none"></div>
-            <span style={{ filter: 'drop-shadow(0 0 4px #facc1599)' }}>⚙</span>
-            <span>SETTINGS</span>
-          </button>
-
-          <button type="button" style={{ touchAction: 'manipulation' }}
-            onClick={() => setShowHowTo(true)}
-            className="bg-[#1a0a2e] border-4 border-white/30 text-white/90 py-3 px-2 text-[8px] relative hover:bg-[#2a1a3e] transition-colors active:translate-y-1"
-          >
-            <div className="absolute top-0 left-0 w-2 h-2 bg-[#0a0118] pointer-events-none"></div>
-            <div className="absolute top-0 right-0 w-2 h-2 bg-[#0a0118] pointer-events-none"></div>
-            <div className="absolute bottom-0 left-0 w-2 h-2 bg-[#0a0118] pointer-events-none"></div>
-            <div className="absolute bottom-0 right-0 w-2 h-2 bg-[#0a0118] pointer-events-none"></div>
-            How to Play
-          </button>
+        {/* Secondary actions — 3 icon buttons in one row */}
+        <div className="grid grid-cols-3 gap-2">
+          {[
+            { label: 'CODEX',    icon: '✦', color: '#10b981', onClick: () => navigate('/codex') },
+            { label: 'SETTINGS', icon: '⚙', color: '#facc15', onClick: () => setShowSettings(true) },
+            { label: 'HOW TO',   icon: '?', color: '#60a5fa', onClick: () => setShowHowTo(true) },
+          ].map(b => (
+            <button
+              key={b.label}
+              type="button"
+              style={{ touchAction: 'manipulation' }}
+              onClick={b.onClick}
+              className="relative bg-[#1a0a2e] border-2 py-2.5 flex flex-col items-center justify-center gap-1 hover:bg-[#2a1a3e] transition-colors active:translate-y-0.5"
+            >
+              <div className="absolute top-0 left-0  w-1.5 h-1.5 pointer-events-none" style={{ backgroundColor: b.color }} />
+              <div className="absolute top-0 right-0 w-1.5 h-1.5 pointer-events-none" style={{ backgroundColor: b.color }} />
+              <div className="absolute bottom-0 left-0  w-1.5 h-1.5 pointer-events-none" style={{ backgroundColor: b.color }} />
+              <div className="absolute bottom-0 right-0 w-1.5 h-1.5 pointer-events-none" style={{ backgroundColor: b.color }} />
+              <span
+                className="text-[16px] leading-none"
+                style={{ color: b.color, textShadow: `0 0 6px ${b.color}99`, filter: `drop-shadow(0 0 3px ${b.color}aa)` }}
+              >
+                {b.icon}
+              </span>
+              <span className="text-[6px] text-white/70 tracking-widest">{b.label}</span>
+              <div
+                className="absolute inset-0 border-2 pointer-events-none opacity-40"
+                style={{ borderColor: b.color }}
+              />
+            </button>
+          ))}
         </div>
+      </div>
+
+      {/* ── Footer credit ── */}
+      <div className="w-full flex items-center justify-between mb-2 relative z-30 text-[5px] tracking-widest">
+        <span className="text-white/30">v1.0</span>
+        <span className="text-[#a78bfa]/50">// THE WARDEN'S WATCH</span>
+        <span className="text-white/30">WEBXR</span>
       </div>
 
       {/* ── How to Play Modal ── */}
@@ -575,6 +680,15 @@ export default function HomePage() {
           </div>
         </div>
       )}
+
+      {/* ── Settings Modal (portal-rendered, escapes parent stacking) ── */}
+      <SettingsModal
+        open={showSettings}
+        settings={settings}
+        setSetting={setSetting}
+        resetSettings={resetSettings}
+        onClose={() => setShowSettings(false)}
+      />
 
     </div>
   );
