@@ -2,6 +2,7 @@ import { defineConfig } from 'vite'
 import path from 'path'
 import tailwindcss from '@tailwindcss/vite'
 import react from '@vitejs/plugin-react'
+import basicSsl from '@vitejs/plugin-basic-ssl'
 
 
 function figmaAssetResolver() {
@@ -23,7 +24,13 @@ export default defineConfig({
     // Tailwind is not being actively used – do not remove them
     react(),
     tailwindcss(),
+    basicSsl(), // self-signed HTTPS so WebXR works on phones over LAN
   ],
+  server: {
+    host: true,   // listen on 0.0.0.0 so phones on the same Wi-Fi can connect
+    port: 5173,
+    https: true,  // required for WebXR from non-localhost origins
+  },
   resolve: {
     alias: {
       // Alias @ to the src directory

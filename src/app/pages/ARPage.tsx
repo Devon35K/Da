@@ -1,6 +1,7 @@
 import { useNavigate } from 'react-router';
-import { useRef } from 'react';
+import { useRef, useEffect, useState } from 'react';
 import { useARGame, GamePhase } from '../hooks/useARGame';
+import { useHandDetection } from '../hooks/useHandDetection';
 
 const STATUS_LABEL: Record<GamePhase, string> = {
   'checking':    'CHECKING DEVICE...',
@@ -10,7 +11,8 @@ const STATUS_LABEL: Record<GamePhase, string> = {
   'scanning':    'SCANNING SURFACE...',
   'plane-found': 'SURFACE LOCKED ✓',
   'loading':     'LOADING MODELS...',
-  'playing':     'SMASH THE ROCKS!',
+  'playing':     'COMBAT ACTIVE',
+  'game-over':   'DEFEATED',
   'error':       'SESSION ERROR',
 };
 
@@ -23,24 +25,62 @@ const STATUS_COLOR: Record<GamePhase, string> = {
   'plane-found': '#10b981',
   'loading':     '#a78bfa',
   'playing':     '#ec4899',
+  'game-over':   '#ef4444',
   'error':       '#ef4444',
 };
 
 export default function ARPage() {
   const navigate    = useNavigate();
   const overlayRef  = useRef<HTMLDivElement>(null);
-  const { phase, smashed, total, errorMsg, startAR, startGame, stopAR } = useARGame();
+
+  const hand = useHandDetection();
+  const { phase, smashed, wave, hp, maxHp, damageTick, errorMsg, startAR, startGame, stopAR } = useARGame({
+    handLandmarksRef: hand.landmarksRef,
+  });
+
+  // Start hand detection as soon as we enter 'playing'; stop on game-over / exit
+  useEffect(() => {
+    if (phase === 'playing' && !hand.ready && !hand.loading) {
+      hand.start().catch(() => {});
+    }
+    if ((phase === 'idle' || phase === 'game-over') && hand.ready) {
+      hand.stop();
+    }
+  }, [phase, hand]);
+
+  // Landmark overlay state (sampled from ref each frame so the overlay redraws)
+  const [overlayTick, setOverlayTick] = useState(0);
+  useEffect(() => {
+    if (phase !== 'playing') return;
+    let raf = 0;
+    const loop = () => { setOverlayTick(t => (t + 1) % 1000000); raf = requestAnimationFrame(loop); };
+    raf = requestAnimationFrame(loop);
+    return () => cancelAnimationFrame(raf);
+  }, [phase]);
 
   const color       = STATUS_COLOR[phase];
   const label       = STATUS_LABEL[phase];
-  const isARLive    = phase === 'scanning' || phase === 'plane-found' || phase === 'loading' || phase === 'playing';
+  const isARLive    = phase === 'scanning' || phase === 'plane-found' || phase === 'loading' ||
+                      phase === 'playing'  || phase === 'game-over';
   const isStartable = phase === 'idle' || phase === 'error';
   const showStart   = phase === 'plane-found';
   const isPlaying   = phase === 'playing';
   const isLoading   = phase === 'loading' || phase === 'starting';
+  const isEnd       = phase === 'game-over';
+  const hpPct       = Math.max(0, Math.min(100, (hp / maxHp) * 100));
+  const hpColor     = hpPct > 60 ? '#10b981' : hpPct > 30 ? '#facc15' : '#ef4444';
 
-  const handleStartAR  = () => startAR(overlayRef.current ?? undefined);
-  const handleExit     = () => { stopAR(); navigate('/mission'); };
+  // Damage flash
+  const [flashing, setFlashing] = useState(false);
+  useEffect(() => {
+    if (damageTick === 0) return;
+    setFlashing(true);
+    const t = setTimeout(() => setFlashing(false), 350);
+    return () => clearTimeout(t);
+  }, [damageTick]);
+
+  const handleStartAR = () => startAR(overlayRef.current ?? undefined);
+  const handleExit    = () => { stopAR(); navigate('/mission'); };
 
   return (
     <div
@@ -88,11 +128,91 @@ export default function ARPage() {
           animation: (isARLive && phase !== 'plane-found' && !isPlaying) ? 'blink 1s ease-in-out infinite' : 'none',
         }}>{label}</div>
 
-        {isPlaying
-          ? <div className="text-[7px] text-[#ec4899]">{smashed}/{total}</div>
+        {(isPlaying || isEnd)
+          ? <div className="text-[7px] text-[#ec4899]">KILLS {smashed}</div>
           : <div className="text-[7px]" style={{ color: isARLive ? '#10b981' : '#374151' }}>WAVE 01</div>
         }
       </div>
+
+      {/* ── HP Bar + Wave indicator (during combat) ── */}
+      {(isPlaying || isEnd) && (
+        <div className="absolute top-14 inset-x-0 px-10" style={{ zIndex: 30 }}>
+          <div className="flex items-center justify-between mb-1">
+            <span className="text-[6px] text-white/60 tracking-widest">HP</span>
+            <span className="text-[6px] text-[#facc15] tracking-widest">WAVE {String(wave).padStart(2,'0')}</span>
+            <span className="text-[6px]" style={{ color: hpColor }}>{hp}/{maxHp}</span>
+          </div>
+          <div className="w-full h-2 bg-[#1a0a2e]/80 border border-white/20">
+            <div
+              className="h-full transition-all duration-300 ease-out"
+              style={{
+                width: `${hpPct}%`,
+                backgroundColor: hpColor,
+                boxShadow: `0 0 8px ${hpColor}`,
+              }}
+            />
+          </div>
+        </div>
+      )}
+
+      {/* ── Damage flash ── */}
+      {flashing && (
+        <div
+          className="pointer-events-none absolute inset-0"
+          style={{
+            backgroundColor: 'rgba(239,68,68,0.35)',
+            boxShadow: 'inset 0 0 120px 40px rgba(239,68,68,0.6)',
+            animation: 'fadeSlide .35s ease-out',
+            zIndex: 45,
+          }}
+        />
+      )}
+
+      {/* ── Hand landmark overlay ── */}
+      {isPlaying && hand.ready && (
+        <div className="pointer-events-none absolute inset-0" style={{ zIndex: 40 }}>
+          {hand.landmarksRef.current.map((lm, hi) => (
+            <div key={`h${hi}-${overlayTick & 1}`}>
+              {[4, 8, 12, 16, 20].map(idx => {
+                const p = lm[idx];
+                if (!p) return null;
+                return (
+                  <div
+                    key={idx}
+                    className="absolute rounded-full"
+                    style={{
+                      left: `${p.x * 100}%`,
+                      top:  `${p.y * 100}%`,
+                      width: 18, height: 18,
+                      transform: 'translate(-50%, -50%)',
+                      backgroundColor: '#10b981',
+                      boxShadow: '0 0 14px #10b981, 0 0 6px #10b981',
+                      opacity: 0.85,
+                    }}
+                  />
+                );
+              })}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* ── Hand detection status badge ── */}
+      {isPlaying && (
+        <div
+          className="absolute left-10 bottom-24 text-[6px] tracking-widest px-2 py-1 border"
+          style={{
+            zIndex: 30,
+            color:       hand.ready ? '#10b981' : hand.loading ? '#facc15' : '#a78bfa',
+            borderColor: hand.ready ? '#10b981' : hand.loading ? '#facc15' : '#a78bfa',
+          }}
+        >
+          {hand.error ? `HAND ERR: ${hand.error.slice(0, 20)}`
+          : hand.loading ? 'LOADING HAND AI...'
+          : hand.ready   ? `HANDS: ${hand.handCount}`
+          :                'HAND AI IDLE'}
+        </div>
+      )}
 
       {/* ── PRE-AR screen ── */}
       {!isARLive && (
@@ -189,26 +309,38 @@ export default function ARPage() {
 
           {/* In-game HUD */}
           {isPlaying && (
-            <>
-              <div className="absolute bottom-10 inset-x-0 text-center"
-                style={{ zIndex:30, animation:'fadeSlide .3s ease-out' }}>
-                <p className="text-[8px] text-[#ec4899] tracking-widest"
-                  style={{ animation:'blink 2s ease-in-out infinite' }}>
-                  TAP ROCKS TO SMASH
-                </p>
+            <div className="absolute bottom-10 inset-x-0 text-center"
+              style={{ zIndex:30, animation:'fadeSlide .3s ease-out' }}>
+              <p className="text-[8px] text-[#ec4899] tracking-widest"
+                style={{ animation:'blink 2.2s ease-in-out infinite' }}>
+                TAP RED ROCKS BEFORE THEY HIT YOU
+              </p>
+            </div>
+          )}
+
+          {/* Game-over overlay */}
+          {isEnd && (
+            <div className="absolute inset-0 flex flex-col items-center justify-center gap-4 px-8"
+              style={{ zIndex:50, backgroundColor:'rgba(10,1,24,.82)', animation:'fadeSlide .5s ease-out' }}>
+              <p className="text-[22px] tracking-widest text-[#ef4444]">DEFEATED</p>
+              <div className="text-center space-y-2">
+                <p className="text-[10px] text-[#ec4899] tracking-widest">KILLS: {smashed}</p>
+                <p className="text-[8px] text-[#facc15] tracking-widest">WAVE REACHED: {wave}</p>
               </div>
-              {smashed === total && total > 0 && (
-                <div className="absolute inset-0 flex flex-col items-center justify-center gap-4"
-                  style={{ zIndex:40, backgroundColor:'rgba(10,1,24,.75)', animation:'fadeSlide .5s ease-out' }}>
-                  <p className="text-[14px] text-[#10b981] tracking-widest">CLEARED!</p>
-                  <p className="text-[8px] text-white/60">All {total} rocks smashed</p>
-                  <button onClick={handleExit}
-                    className="mt-4 py-3 px-6 text-[9px] border-4 border-[#ec4899] bg-[#8b5cf6] text-white hover:bg-[#a78bfa] transition-colors">
-                    &gt; RETURN &lt;
-                  </button>
-                </div>
-              )}
-            </>
+
+              <button onClick={async () => { stopAR(); await new Promise(r=>setTimeout(r,80)); handleStartAR(); }}
+                className="mt-2 py-3 px-6 text-[9px] border-4 border-[#ec4899] bg-[#8b5cf6] text-white hover:bg-[#a78bfa] transition-colors relative">
+                <div className="absolute top-0 left-0 w-2 h-2 bg-[#0a0118]"/>
+                <div className="absolute top-0 right-0 w-2 h-2 bg-[#0a0118]"/>
+                <div className="absolute bottom-0 left-0 w-2 h-2 bg-[#0a0118]"/>
+                <div className="absolute bottom-0 right-0 w-2 h-2 bg-[#0a0118]"/>
+                &gt; RETRY &lt;
+              </button>
+              <button onClick={handleExit}
+                className="py-2 px-5 text-[8px] border-2 border-white/30 text-white/70 hover:text-white transition-colors">
+                EXIT TO MISSION
+              </button>
+            </div>
           )}
         </>
       )}
