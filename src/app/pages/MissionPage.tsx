@@ -317,6 +317,7 @@ export default function MissionPage() {
       {/* ── Engage Button ── */}
       <button
         disabled={!ready}
+        onClick={() => ready && navigate('/ar')}
         className="w-full py-4 px-6 text-[10px] border-4 relative transition-all duration-300"
         style={{
           backgroundColor: ready ? '#8b5cf6' : '#1a0a2e',

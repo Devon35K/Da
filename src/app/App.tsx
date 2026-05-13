@@ -1,6 +1,7 @@
 import { BrowserRouter, Routes, Route } from 'react-router';
 import HomePage from './pages/HomePage';
 import MissionPage from './pages/MissionPage';
+import ARPage from './pages/ARPage';
 import { useBgMusic } from './hooks/useBgMusic';
 import bgMusicSrc from '../music/bmusic.mp3';
 
@@ -16,6 +17,7 @@ export default function App() {
       <Routes>
         <Route path="/" element={<HomePage />} />
         <Route path="/mission" element={<MissionPage />} />
+        <Route path="/ar" element={<ARPage />} />
       </Routes>
     </BrowserRouter>
   );
