@@ -1,8 +1,16 @@
 import { useCallback, useState } from 'react';
 import { pickRandomWord } from '../data/wardenCodex';
+import { getSettings } from './useSettings';
 
-const API_BASE: string =
-  (import.meta as any).env?.VITE_API_BASE ?? 'http://localhost:8000';
+const _OFFLINE_HINTS = [
+  'Focus on letters you have not yet tried.',
+  'One of your letters sits in the wrong constellation.',
+  'Trust the colors. They never lie.',
+  'The seal is forged from elements both ancient and familiar.',
+];
+
+// See useDictionary.ts — relative default routes through Vite proxy.
+const API_BASE: string = (import.meta as any).env?.VITE_API_BASE ?? '';
 
 export interface HintAttempt {
   guess:  string;
@@ -43,6 +51,12 @@ export function useCodex() {
     word: string,
     attempts: HintAttempt[],
   ): Promise<string> => {
+    // Settings gate — skip the network call entirely if user disabled AI hints
+    if (!getSettings().aiHintsEnabled) {
+      const local = _OFFLINE_HINTS[Math.floor(Math.random() * _OFFLINE_HINTS.length)];
+      setHint(local);
+      return local;
+    }
     setHintLoading(true);
     setHint(null);
     try {

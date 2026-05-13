@@ -6,8 +6,8 @@
  *   const taunt = await fetchTaunt('word_solved', 'Player solved BLAZE in 3 tries');
  */
 
-const API_BASE: string =
-  (import.meta as any).env?.VITE_API_BASE ?? 'http://localhost:8000';
+// Relative default routes through Vite dev proxy (vite.config.ts).
+const API_BASE: string = (import.meta as any).env?.VITE_API_BASE ?? '';
 
 export type BossEvent =
   | 'asteroid_smashed'
@@ -35,12 +35,22 @@ function _randomFallback(event: BossEvent): string {
 
 /**
  * Fetch a live AI taunt from the backend.
- * Returns a fallback string immediately if the network call fails.
+ * Returns a fallback string immediately if the network call fails OR if
+ * the user has disabled boss taunts in Settings.
  */
 export async function fetchTaunt(
   event: BossEvent,
   context = '',
 ): Promise<string> {
+  // Settings gate — local fallback only when AI taunts are disabled
+  try {
+    const raw = localStorage.getItem('arwordle.settings.v1');
+    if (raw) {
+      const s = JSON.parse(raw);
+      if (s && s.bossTauntsEnabled === false) return _randomFallback(event);
+    }
+  } catch { /* localStorage not available — proceed to fetch */ }
+
   try {
     const res = await fetch(`${API_BASE}/api/boss/taunt/`, {
       method:  'POST',

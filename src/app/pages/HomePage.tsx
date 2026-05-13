@@ -2,6 +2,8 @@ import { useNavigate } from 'react-router';
 import { useMemo, useState } from 'react';
 import { ImageWithFallback } from '../components/figma/ImageWithFallback';
 import iconImage from '../../imports/iconaws.png';
+import { useSettings } from '../hooks/useSettings';
+import SettingsModal from '../components/SettingsModal';
 
 function seededRand(seed: number): number {
   const x = Math.sin(seed + 1) * 10000;
@@ -10,42 +12,79 @@ function seededRand(seed: number): number {
 
 const WORDLE_LETTERS = ['W', 'O', 'R', 'D', 'L', 'E', 'G', 'R', 'U'];
 
-const HOW_TO_PLAY_STEPS = [
+// Each step gets its own accent color + icon so the modal scans visually,
+// not just a number list. Body covers the actual game mechanics in v1.
+type HowToStep = {
+  num:    string;
+  title:  string;
+  color:  string;
+  icon:   string;
+  body?:  string;
+  /** Optional list-of-(label, value) for compact bullet-style detail rows. */
+  bullets?: ReadonlyArray<{ label: string; value: string; color?: string }>;
+  /** When set, shows the Wordle color legend + a demo 5-tile row. */
+  wordleDemo?: { word: string; colors: ReadonlyArray<'green' | 'yellow' | 'gray'> };
+};
+
+const HOW_TO_PLAY_STEPS: ReadonlyArray<HowToStep> = [
   {
-    num: '1',
-    title: 'Setup AR Mode',
-    body: 'Point your camera at a flat surface and wait for plane detection.',
+    num:   '1',
+    title: 'SCAN A SURFACE',
+    color: '#10b981',
+    icon:  '◉',
+    body:  'Point your camera at a flat floor or table. The Warden auto-locks an origin after a few seconds even if your device cannot detect planes.',
   },
   {
-    num: '2',
-    title: 'Smash Asteroids',
-    body: 'Tap on 3D asteroids to shatter them and collect falling letters.',
+    num:   '2',
+    title: 'TAP RED ROCKS ONLY',
+    color: '#ef4444',
+    icon:  '◬',
+    body:  'Asteroids charge before they strike — they glow RED. Tap red rocks to smash them. Drifting (still) rocks are invulnerable; tapping them just kicks up dust.',
   },
   {
-    num: '3',
-    title: 'Solve Words',
-    body: "Arrange letters to complete 5-letter words from the Warden's Codex.",
+    num:   '3',
+    title: 'COLLECT LETTERS',
+    color: '#facc15',
+    icon:  '✦',
+    body:  'Each smashed rock drops a letter onto your keyboard inventory. Numbers below each key show how many copies you carry.',
   },
   {
-    num: '4',
-    title: 'Color Feedback',
-    body: null,
-    feedback: [
-      { dot: '#10b981', label: 'Green',  desc: 'Correct letter, correct position' },
-      { dot: '#facc15', label: 'Yellow', desc: 'Correct letter, wrong position' },
-      { dot: '#6b7280', label: 'Gray',   desc: 'Letter not in word' },
+    num:   '4',
+    title: 'BEAT THE 60s TIMER',
+    color: '#60a5fa',
+    icon:  '◷',
+    body:  'Each wave runs for 60 seconds. When the clock hits zero a Wordle puzzle slides up — solve it to advance. Asteroids freeze instantly when the timer ends.',
+  },
+  {
+    num:   '5',
+    title: 'SOLVE THE SEAL',
+    color: '#8b5cf6',
+    icon:  '▦',
+    body:  'Type a 5-letter word using your collected letters. You get 6 attempts.',
+    wordleDemo: {
+      word:   'BLAZE',
+      colors: ['green', 'gray', 'yellow', 'gray', 'gray'],
+    },
+  },
+  {
+    num:   '6',
+    title: 'DEFEAT THE OVERLORD',
+    color: '#ec4899',
+    icon:  '★',
+    body:  'Every 10th wave is a boss fight. The Rift Overlord attacks every 8 seconds — break all his seals before HP runs out. The final seal is RIFTS.',
+    bullets: [
+      { label: 'WAVE TIMER', value: '60s',  color: '#10b981' },
+      { label: 'BOSS AT',    value: 'WAVE 10', color: '#facc15' },
+      { label: 'FINAL',      value: 'RIFTS',  color: '#ec4899' },
     ],
-  },
-  {
-    num: '5',
-    title: 'Defeat the Boss',
-    body: 'Survive enemy attacks and complete the Final Seal word to defeat the Rift Overlord.',
   },
 ] as const;
 
 export default function HomePage() {
   const navigate = useNavigate();
-  const [showHowTo, setShowHowTo] = useState(false);
+  const [showHowTo,    setShowHowTo]    = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
+  const { settings, setSetting, resetSettings } = useSettings();
 
   const stars = useMemo(() =>
     Array.from({ length: 30 }, (_, i) => ({
@@ -154,6 +193,24 @@ export default function HomePage() {
             box-shadow: 0 0 10px #60a5fa, 0 0 26px #60a5faaa, 0 0 52px #60a5fa44, inset 0 0 12px #60a5fa11;
           }
         }
+        @keyframes ringRotate {
+          from { transform: rotate(0deg); }
+          to   { transform: rotate(360deg); }
+        }
+        @keyframes tileFlip {
+          0%   { transform: rotateX(0); background-color: #1a0a2e; color: #facc15; border-color: #8b5cf6; }
+          50%  { transform: rotateX(90deg); }
+          51%  { background-color: var(--reveal-bg); color: var(--reveal-fg); border-color: var(--reveal-bg); }
+          100% { transform: rotateX(0); background-color: var(--reveal-bg); color: var(--reveal-fg); border-color: var(--reveal-bg); }
+        }
+        @keyframes titleEnter {
+          from { transform: translateY(-12px); opacity: 0; letter-spacing: 0.4em; }
+          to   { transform: translateY(0); opacity: 1; letter-spacing: normal; }
+        }
+        @keyframes ctaShimmer {
+          0%, 100% { box-shadow: 0 0 0 0 rgba(236,72,153,0), 0 0 24px 0 rgba(139,92,246,0.45); }
+          50%      { box-shadow: 0 0 0 12px rgba(236,72,153,0), 0 0 36px 4px rgba(139,92,246,0.7); }
+        }
       `}</style>
 
       {/* Twinkling Stars */}
@@ -243,8 +300,8 @@ export default function HomePage() {
         />
       ))}
 
-      {/* Pixel Grid Background */}
-      <div className="absolute inset-0 opacity-10" style={{
+      {/* Pixel Grid Background — pointer-events-none so it doesn't swallow taps */}
+      <div className="absolute inset-0 opacity-10 pointer-events-none" style={{
         backgroundImage: `
           linear-gradient(0deg, transparent 24%, rgba(139, 92, 246, .3) 25%, rgba(139, 92, 246, .3) 26%, transparent 27%, transparent 74%, rgba(139, 92, 246, .3) 75%, rgba(139, 92, 246, .3) 76%, transparent 77%, transparent),
           linear-gradient(90deg, transparent 24%, rgba(139, 92, 246, .3) 25%, rgba(139, 92, 246, .3) 26%, transparent 27%, transparent 74%, rgba(139, 92, 246, .3) 75%, rgba(139, 92, 246, .3) 76%, transparent 77%, transparent)
@@ -281,10 +338,10 @@ export default function HomePage() {
       {/* Middle Content */}
       <div className="flex flex-col items-center space-y-6 flex-grow justify-center relative z-10 w-full">
         <div className="bg-[#1a0a2e] border-4 border-[#8b5cf6] p-4 w-full relative">
-          <div className="absolute top-0 left-0 w-2 h-2 bg-[#0a0118]"></div>
-          <div className="absolute top-0 right-0 w-2 h-2 bg-[#0a0118]"></div>
-          <div className="absolute bottom-0 left-0 w-2 h-2 bg-[#0a0118]"></div>
-          <div className="absolute bottom-0 right-0 w-2 h-2 bg-[#0a0118]"></div>
+          <div className="absolute top-0 left-0 w-2 h-2 bg-[#0a0118] pointer-events-none"></div>
+          <div className="absolute top-0 right-0 w-2 h-2 bg-[#0a0118] pointer-events-none"></div>
+          <div className="absolute bottom-0 left-0 w-2 h-2 bg-[#0a0118] pointer-events-none"></div>
+          <div className="absolute bottom-0 right-0 w-2 h-2 bg-[#0a0118] pointer-events-none"></div>
 
           <p className="text-[9px] text-white/90 text-center leading-[16px]">
             Smash meteors in AR, collect letters, and solve puzzles to defeat the{' '}
@@ -293,29 +350,54 @@ export default function HomePage() {
         </div>
       </div>
 
-      {/* CTA Section */}
-      <div className="w-full space-y-4 mb-8 relative z-10">
-        <button
+      {/* CTA Section — z-30 so it sits above all decorative layers */}
+      <div className="w-full space-y-4 mb-8 relative z-30">
+        <button type="button" style={{ touchAction: 'manipulation' }}
           onClick={() => navigate('/mission')}
           className="w-full bg-[#8b5cf6] border-4 border-[#ec4899] text-white py-4 px-6 text-[10px] relative hover:bg-[#a78bfa] transition-colors active:translate-y-1"
         >
-          <div className="absolute top-0 left-0 w-2 h-2 bg-[#0a0118]"></div>
-          <div className="absolute top-0 right-0 w-2 h-2 bg-[#0a0118]"></div>
-          <div className="absolute bottom-0 left-0 w-2 h-2 bg-[#0a0118]"></div>
-          <div className="absolute bottom-0 right-0 w-2 h-2 bg-[#0a0118]"></div>
+          <div className="absolute top-0 left-0 w-2 h-2 bg-[#0a0118] pointer-events-none"></div>
+          <div className="absolute top-0 right-0 w-2 h-2 bg-[#0a0118] pointer-events-none"></div>
+          <div className="absolute bottom-0 left-0 w-2 h-2 bg-[#0a0118] pointer-events-none"></div>
+          <div className="absolute bottom-0 right-0 w-2 h-2 bg-[#0a0118] pointer-events-none"></div>
           &gt; START MISSION &lt;
         </button>
 
-        <button
-          onClick={() => setShowHowTo(true)}
-          className="w-full bg-[#1a0a2e] border-4 border-white/30 text-white/90 py-3 px-6 text-[9px] relative hover:bg-[#2a1a3e] transition-colors active:translate-y-1"
+        <button type="button" style={{ touchAction: 'manipulation' }}
+          onClick={() => navigate('/codex')}
+          className="w-full bg-[#1a0a2e] border-4 border-[#10b981] text-[#10b981] py-3 px-6 text-[9px] relative hover:bg-[#2a1a3e] transition-colors active:translate-y-1"
         >
-          <div className="absolute top-0 left-0 w-2 h-2 bg-[#0a0118]"></div>
-          <div className="absolute top-0 right-0 w-2 h-2 bg-[#0a0118]"></div>
-          <div className="absolute bottom-0 left-0 w-2 h-2 bg-[#0a0118]"></div>
-          <div className="absolute bottom-0 right-0 w-2 h-2 bg-[#0a0118]"></div>
-          How to Play
+          <div className="absolute top-0 left-0 w-2 h-2 bg-[#0a0118] pointer-events-none"></div>
+          <div className="absolute top-0 right-0 w-2 h-2 bg-[#0a0118] pointer-events-none"></div>
+          <div className="absolute bottom-0 left-0 w-2 h-2 bg-[#0a0118] pointer-events-none"></div>
+          <div className="absolute bottom-0 right-0 w-2 h-2 bg-[#0a0118] pointer-events-none"></div>
+          &gt; CODEX DICTIONARY &lt;
         </button>
+
+        <div className="grid grid-cols-2 gap-3">
+          <button type="button" style={{ touchAction: 'manipulation' }}
+            onClick={() => setShowSettings(true)}
+            className="bg-[#1a0a2e] border-4 border-[#facc15] text-[#facc15] py-3 px-2 text-[8px] relative hover:bg-[#2a1a3e] transition-colors active:translate-y-1 flex items-center justify-center gap-1.5"
+          >
+            <div className="absolute top-0 left-0 w-2 h-2 bg-[#0a0118] pointer-events-none"></div>
+            <div className="absolute top-0 right-0 w-2 h-2 bg-[#0a0118] pointer-events-none"></div>
+            <div className="absolute bottom-0 left-0 w-2 h-2 bg-[#0a0118] pointer-events-none"></div>
+            <div className="absolute bottom-0 right-0 w-2 h-2 bg-[#0a0118] pointer-events-none"></div>
+            <span style={{ filter: 'drop-shadow(0 0 4px #facc1599)' }}>⚙</span>
+            <span>SETTINGS</span>
+          </button>
+
+          <button type="button" style={{ touchAction: 'manipulation' }}
+            onClick={() => setShowHowTo(true)}
+            className="bg-[#1a0a2e] border-4 border-white/30 text-white/90 py-3 px-2 text-[8px] relative hover:bg-[#2a1a3e] transition-colors active:translate-y-1"
+          >
+            <div className="absolute top-0 left-0 w-2 h-2 bg-[#0a0118] pointer-events-none"></div>
+            <div className="absolute top-0 right-0 w-2 h-2 bg-[#0a0118] pointer-events-none"></div>
+            <div className="absolute bottom-0 left-0 w-2 h-2 bg-[#0a0118] pointer-events-none"></div>
+            <div className="absolute bottom-0 right-0 w-2 h-2 bg-[#0a0118] pointer-events-none"></div>
+            How to Play
+          </button>
+        </div>
       </div>
 
       {/* ── How to Play Modal ── */}
@@ -330,79 +412,166 @@ export default function HomePage() {
             style={{ maxHeight: '88vh', animation: 'modalSlideUp 0.4s cubic-bezier(0.22, 1, 0.36, 1)' }}
             onClick={e => e.stopPropagation()}
           >
-            <div className="absolute top-0 left-0 w-2 h-2 bg-[#0a0118]" />
-            <div className="absolute top-0 right-0 w-2 h-2 bg-[#0a0118]" />
+            <div className="absolute top-0 left-0 w-2 h-2 bg-[#0a0118] pointer-events-none" />
+            <div className="absolute top-0 right-0 w-2 h-2 bg-[#0a0118] pointer-events-none" />
 
             {/* Modal header */}
             <div
               className="bg-[#1a0a2e] border-b-4 border-[#8b5cf6] px-5 py-4 flex items-center justify-between"
               style={{ animation: 'headerSlideDown 0.3s 0.15s ease-out both' }}
             >
-              <p className="text-[10px] text-[#8b5cf6] tracking-widest">HOW TO PLAY</p>
+              <div>
+                <p className="text-[10px] text-[#8b5cf6] tracking-widest">HOW TO PLAY</p>
+                <p className="text-[6px] text-white/40 tracking-widest mt-1">FIELD MANUAL · v1</p>
+              </div>
               <button
                 onClick={() => setShowHowTo(false)}
-                className="text-[#a78bfa] hover:text-white text-[9px] transition-colors"
+                className="w-7 h-7 flex items-center justify-center border-2 border-[#a78bfa] text-[#a78bfa] hover:text-white hover:border-white text-[9px] transition-colors"
+                aria-label="Close"
               >
                 ✕
               </button>
             </div>
 
             {/* Steps */}
-            <div className="px-5 py-4 space-y-5">
+            <div className="px-4 py-4 space-y-4">
               {HOW_TO_PLAY_STEPS.map((step, i) => (
                 <div
                   key={step.num}
-                  className="flex gap-3"
-                  style={{ animation: `stepFadeIn 0.3s ${0.2 + i * 0.07}s ease-out both` }}
+                  className="relative bg-[#0d0220] border-2 px-3 py-3"
+                  style={{
+                    borderColor: `${step.color}66`,
+                    animation:   `stepFadeIn 0.3s ${0.2 + i * 0.07}s ease-out both`,
+                    boxShadow:   `inset 0 0 12px ${step.color}1a`,
+                  }}
                 >
-                  <div
-                    className="w-6 h-6 flex-shrink-0 flex items-center justify-center border-2 border-[#ec4899] bg-[#1a0a2e]"
-                    style={{ fontSize: '8px', color: '#ec4899' }}
-                  >
-                    {step.num}
-                  </div>
-                  <div className="flex-1">
-                    <p className="text-[8px] text-[#facc15] mb-1 tracking-wide">{step.title}</p>
-                    {'body' in step && step.body && (
-                      <p className="text-[7px] text-white/70 leading-[14px]">{step.body}</p>
-                    )}
-                    {'feedback' in step && step.feedback && (
-                      <div className="space-y-1.5 mt-1">
-                        {step.feedback.map(f => (
-                          <div key={f.label} className="flex items-center gap-2">
-                            <div
-                              className="w-3 h-3 flex-shrink-0"
-                              style={{ backgroundColor: f.dot, boxShadow: `0 0 4px ${f.dot}` }}
-                            />
-                            <span className="text-[7px] leading-[13px]" style={{ color: f.dot }}>
-                              {f.label}:
-                            </span>
-                            <span className="text-[7px] text-white/60 leading-[13px]">{f.desc}</span>
-                          </div>
-                        ))}
+                  {/* Pixel corner accents */}
+                  <div className="absolute top-0 left-0  w-1.5 h-1.5" style={{ backgroundColor: step.color }} />
+                  <div className="absolute top-0 right-0 w-1.5 h-1.5" style={{ backgroundColor: step.color }} />
+                  <div className="absolute bottom-0 left-0  w-1.5 h-1.5" style={{ backgroundColor: step.color }} />
+                  <div className="absolute bottom-0 right-0 w-1.5 h-1.5" style={{ backgroundColor: step.color }} />
+
+                  <div className="flex gap-3">
+                    {/* Icon + number tile */}
+                    <div className="flex flex-col items-center gap-1 flex-shrink-0">
+                      <div
+                        className="w-9 h-9 flex items-center justify-center border-2 bg-[#1a0a2e] text-[14px]"
+                        style={{
+                          borderColor: step.color,
+                          color:       step.color,
+                          textShadow:  `0 0 6px ${step.color}`,
+                          boxShadow:   `0 0 8px ${step.color}55, inset 0 0 4px ${step.color}33`,
+                        }}
+                      >
+                        {step.icon}
                       </div>
-                    )}
+                      <span
+                        className="text-[6px] tracking-widest"
+                        style={{ color: `${step.color}cc` }}
+                      >
+                        STEP {step.num}
+                      </span>
+                    </div>
+
+                    {/* Title + body */}
+                    <div className="flex-1 min-w-0 pt-0.5">
+                      <p
+                        className="text-[8px] tracking-widest mb-1.5"
+                        style={{ color: step.color }}
+                      >
+                        {step.title}
+                      </p>
+                      {step.body && (
+                        <p className="text-[7px] text-white/75 leading-[14px]">{step.body}</p>
+                      )}
+
+                      {/* Wordle demo: tile row + 3-color legend */}
+                      {step.wordleDemo && (() => {
+                        const tileBg = (c: 'green' | 'yellow' | 'gray') =>
+                          c === 'green' ? '#10b981' : c === 'yellow' ? '#facc15' : '#374151';
+                        const tileFg = (c: 'green' | 'yellow' | 'gray') =>
+                          c === 'gray' ? '#9ca3af' : '#0a0118';
+                        return (
+                          <div className="mt-3 space-y-2">
+                            <div className="flex gap-1 justify-center">
+                              {step.wordleDemo.word.split('').map((ch, idx) => {
+                                const c = step.wordleDemo!.colors[idx];
+                                return (
+                                  <div
+                                    key={idx}
+                                    className="w-6 h-6 flex items-center justify-center border-2"
+                                    style={{
+                                      backgroundColor: tileBg(c),
+                                      borderColor:     tileBg(c),
+                                      color:           tileFg(c),
+                                      fontSize:        '10px',
+                                      fontWeight:      'bold',
+                                      boxShadow:       `0 0 4px ${tileBg(c)}88`,
+                                    }}
+                                  >
+                                    {ch}
+                                  </div>
+                                );
+                              })}
+                            </div>
+                            <div className="space-y-1 pt-1 border-t border-[#8b5cf6]/20">
+                              {([
+                                ['#10b981', 'GREEN',  'right letter, right slot'],
+                                ['#facc15', 'YELLOW', 'right letter, wrong slot'],
+                                ['#374151', 'GRAY',   'letter not in word'],
+                              ] as const).map(([col, name, desc]) => (
+                                <div key={name} className="flex items-center gap-2">
+                                  <div className="w-2.5 h-2.5 flex-shrink-0" style={{ backgroundColor: col, boxShadow: `0 0 3px ${col}` }} />
+                                  <span className="text-[6px] tracking-widest" style={{ color: col }}>{name}</span>
+                                  <span className="text-[6px] text-white/50 leading-[10px]">{desc}</span>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        );
+                      })()}
+
+                      {/* Inline bullet rows — labeled stat tiles */}
+                      {step.bullets && (
+                        <div className="mt-3 grid grid-cols-3 gap-1.5">
+                          {step.bullets.map(b => (
+                            <div
+                              key={b.label}
+                              className="text-center border border-white/10 bg-[#0a0118]/50 py-1.5"
+                            >
+                              <p className="text-[5px] text-white/40 tracking-widest">{b.label}</p>
+                              <p
+                                className="text-[7px] mt-0.5 tracking-widest"
+                                style={{ color: b.color ?? step.color }}
+                              >
+                                {b.value}
+                              </p>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
                   </div>
                 </div>
               ))}
             </div>
 
             {/* Got It button */}
-            <div className="px-5 pb-5">
-              <button
+            <div className="px-5 pb-5 pt-1">
+              <button type="button" style={{ touchAction: 'manipulation' }}
                 onClick={() => setShowHowTo(false)}
-                className="w-full bg-[#8b5cf6] border-4 border-[#ec4899] text-white py-3 px-6 text-[10px] relative hover:bg-[#a78bfa] transition-colors active:translate-y-1"
+                className="w-full bg-[#8b5cf6] border-4 border-[#ec4899] text-white py-3 px-6 text-[10px] relative hover:bg-[#a78bfa] transition-colors active:translate-y-1 tracking-widest"
               >
-                <div className="absolute top-0 left-0 w-2 h-2 bg-[#0a0118]" />
-                <div className="absolute top-0 right-0 w-2 h-2 bg-[#0a0118]" />
-                <div className="absolute bottom-0 left-0 w-2 h-2 bg-[#0a0118]" />
-                <div className="absolute bottom-0 right-0 w-2 h-2 bg-[#0a0118]" />
-                Got It!
+                <div className="absolute top-0 left-0 w-2 h-2 bg-[#0a0118] pointer-events-none" />
+                <div className="absolute top-0 right-0 w-2 h-2 bg-[#0a0118] pointer-events-none" />
+                <div className="absolute bottom-0 left-0 w-2 h-2 bg-[#0a0118] pointer-events-none" />
+                <div className="absolute bottom-0 right-0 w-2 h-2 bg-[#0a0118] pointer-events-none" />
+                &gt; GOT IT &lt;
               </button>
             </div>
 
-            <div className="absolute bottom-0 left-0 w-2 h-2 bg-[#0a0118]" />
-            <div className="absolute bottom-0 right-0 w-2 h-2 bg-[#0a0118]" />
+            <div className="absolute bottom-0 left-0 w-2 h-2 bg-[#0a0118] pointer-events-none" />
+            <div className="absolute bottom-0 right-0 w-2 h-2 bg-[#0a0118] pointer-events-none" />
           </div>
         </div>
       )}

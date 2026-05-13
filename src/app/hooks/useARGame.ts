@@ -4,6 +4,7 @@ import {
   pickRandomWord, pickDropLetter, scoreGuess,
   type LetterColor,
 } from '../data/wardenCodex';
+import { safeVibrate } from './useSettings';
 // GLB assets — Vite resolves these to URL strings at build time
 import asteroidUrl          from '../../3dmodel/asteroid.glb?url';
 import asteroid01Url        from '../../3dmodel/asteroid_01.glb?url';
@@ -80,24 +81,24 @@ export interface UseARGameResult {
   isSupported: boolean;
   paused:      boolean;
   showPlane:   boolean;
-  // Wordle state
-  targetWord:        string;
-  collectedLetters:  string[];
-  currentGuess:      string;
-  attempts:          Array<{ word: string; colors: LetterColor[] }>;
-  wordsSolved:       number;
-  lastResult:        'win' | 'lose' | null;
-  // Wordle actions
-  addLetterToGuess: (letter: string) => void;
-  backspaceGuess:   () => void;
-  submitGuess:      () => void;
-  newWordRound:     () => void;
+  /** Letters dropped from smashed asteroids (auto-collected after their lifespan). */
+  collectedLetters: string[];
   startAR:     (overlayEl?: HTMLElement) => Promise<void>;
   startGame:   () => Promise<void>;
   stopAR:      () => void;
   pause:       () => void;
   resume:      () => void;
   togglePlane: () => void;
+  /** Set the displayed wave number — called by the external wave timer hook. */
+  setWaveTo:        (n: number) => void;
+  /** Apply damage to the player — used by the boss attack timer. */
+  damagePlayer:     (amount: number) => void;
+  /** Remove the given letters from the collected inventory (e.g. after a guess). */
+  consumeLetters:   (letters: string[]) => void;
+  /** Despawn every currently-active asteroid (used when a wave ends). */
+  clearActiveAsteroids: () => void;
+  /** Clear and spawn a fresh wave of asteroids from the pool. */
+  respawnWave:      (count?: number) => void;
 }
 
 // ── Tunables ─────────────────────────────────────────────────────────────────
@@ -185,6 +186,10 @@ export function useARGame(): UseARGameResult {
   const raycasterRef        = useRef(new THREE.Raycaster());
   const canvasRef           = useRef<HTMLCanvasElement | null>(null);
   const camPosRef           = useRef(new THREE.Vector3());
+  /** When the scanning phase started, in performance.now() ms. Used to time out plane detection. */
+  const scanStartedAtRef    = useRef<number>(0);
+  /** True when we're operating without plane-detection (synthetic origin in front of camera). */
+  const noPlaneFallbackRef  = useRef(false);
 
   // 1. Support check -----------------------------------------------------------
   useEffect(() => {
@@ -611,16 +616,17 @@ export function useARGame(): UseARGameResult {
     if (byPlayer) {
       smashedRef.current++;
       setSmashed(smashedRef.current);
-      // Drop a letter for the Wordle puzzle
+      // Drop a letter for the Wordle puzzle.
+      // Wave progression is driven by an external 60-second timer (see useWaveGame),
+      // so we no longer auto-increment wave here.
       spawnLetterDrop(a.obj.position.clone());
-      if (smashedRef.current > 0 && smashedRef.current % WAVE_INITIAL_COUNT === 0) {
-        setWave(w => w + 1);
-      }
     }
 
-    // Respawn from pool after delay (zero allocation)
+    // Respawn from pool after delay (zero allocation).
+    // Skip if the game is paused (intermission, boss fight, or pause menu).
     setTimeout(() => {
       if (phaseRef.current !== 'playing') return;
+      if (pausedRef.current) return;
       spawnFromPool(performance.now());
     }, RESPAWN_DELAY_MS);
   };
@@ -630,7 +636,7 @@ export function useARGame(): UseARGameResult {
     hpRef.current = Math.max(0, hpRef.current - DAMAGE_PER_HIT);
     setHp(hpRef.current);
     setDamageTick(x => x + 1);
-    if ((navigator as any).vibrate) (navigator as any).vibrate(200);
+    safeVibrate(200);
     if (hpRef.current <= 0) setPhase('game-over');
   };
 
@@ -658,7 +664,16 @@ export function useARGame(): UseARGameResult {
       let root: THREE.Object3D = hits[0].object;
       while (root.parent && root.parent !== scene) root = root.parent;
       const target = asteroidsRef.current.find(a => a.obj === root);
-      if (target) killAsteroid(target, true);
+      if (!target) return;
+      // Only RED asteroids (charging or attacking) can be destroyed.
+      // Drifting (still) asteroids are invulnerable — give a tiny dust puff
+      // as feedback so the player sees their tap registered.
+      if (target.state === 'charging' || target.state === 'attacking') {
+        killAsteroid(target, true);
+      } else {
+        spawnDust(target.obj.position.clone(), 6);
+        safeVibrate(30);
+      }
     }
   }, []);
 
@@ -813,10 +828,22 @@ export function useARGame(): UseARGameResult {
     }
   };
 
-  // 9b. Random point INSIDE the detected plane polygon (XZ), with hover height
+  // 9b. Random point INSIDE the detected plane polygon (XZ), with hover height.
+  // If no plane is being tracked (device without plane-detection support),
+  // we sample uniformly inside a circle around worldOriginRef instead.
   const samplePointOnPlane = (): { x: number; y: number; z: number } | null => {
     const plane = bestPlaneRef.current;
-    if (!plane || plane.worldPolygon.length < 3) return null;
+    if (!plane || plane.worldPolygon.length < 3) {
+      const origin = worldOriginRef.current;
+      if (!origin) return null;
+      const r     = SPAWN_RADIUS_MIN + Math.random() * (SPAWN_RADIUS_MAX - SPAWN_RADIUS_MIN);
+      const theta = Math.random() * Math.PI * 2;
+      return {
+        x: origin.x + Math.cos(theta) * r,
+        y: origin.y + SPAWN_HEIGHT_BASE + Math.random() * SPAWN_HEIGHT_RANGE,
+        z: origin.z + Math.sin(theta) * r,
+      };
+    }
     const poly = plane.worldPolygon;
 
     // Bounding box in XZ
@@ -1113,13 +1140,50 @@ export function useARGame(): UseARGameResult {
       cameraRef.current = camera;
 
       const xr = (navigator as any).xr;
-      const sessionInit: Record<string, any> = {
-        requiredFeatures: ['plane-detection'],
-        optionalFeatures: ['hit-test', 'local-floor', 'dom-overlay'],
+      // Tiered session creation: try richer configs first, fall back to bare AR.
+      // We log each attempt so the user can see exactly which one their device accepts.
+      const fullInit: Record<string, any> = {
+        requiredFeatures: [],
+        optionalFeatures: ['plane-detection', 'hit-test', 'local-floor', 'dom-overlay'],
       };
-      if (overlayEl) sessionInit.domOverlay = { root: overlayEl };
+      if (overlayEl) fullInit.domOverlay = { root: overlayEl };
 
-      const session = await xr.requestSession('immersive-ar', sessionInit);
+      const overlayInit: Record<string, any> = {
+        requiredFeatures: [],
+        optionalFeatures: ['dom-overlay'],
+      };
+      if (overlayEl) overlayInit.domOverlay = { root: overlayEl };
+
+      const bareInit: Record<string, any> = {
+        requiredFeatures: [],
+        optionalFeatures: [],
+      };
+
+      let session: any = null;
+      const attempts: Array<{ label: string; init: any }> = [
+        { label: 'full',    init: fullInit    },
+        { label: 'overlay', init: overlayInit },
+        { label: 'bare',    init: bareInit    },
+      ];
+      const errors: string[] = [];
+      for (const a of attempts) {
+        try {
+          // eslint-disable-next-line no-console
+          console.log('[AR] Trying immersive-ar session:', a.label, a.init);
+          session = await xr.requestSession('immersive-ar', a.init);
+          // eslint-disable-next-line no-console
+          console.log('[AR] Session created with config:', a.label);
+          break;
+        } catch (err: any) {
+          const msg = `${a.label}: ${err?.name ?? 'Error'} — ${err?.message ?? err}`;
+          errors.push(msg);
+          // eslint-disable-next-line no-console
+          console.warn('[AR] Session attempt failed —', msg);
+        }
+      }
+      if (!session) {
+        throw new Error(`AR unavailable. Tried ${attempts.length} configs:\n${errors.join('\n')}`);
+      }
       sessionRef.current = session;
       await renderer.xr.setSession(session);
 
@@ -1129,6 +1193,8 @@ export function useARGame(): UseARGameResult {
       refSpaceRef.current = refSpace;
 
       setPhase('scanning');
+      scanStartedAtRef.current = performance.now();
+      noPlaneFallbackRef.current = false;
 
       // ── Master animation loop ──────────────────────────────────────────────
       renderer.setAnimationLoop((_time: number, frame: any) => {
@@ -1138,6 +1204,32 @@ export function useARGame(): UseARGameResult {
         // 1. Plane tracking — throttled to ~15 Hz (every 4th frame)
         if ((frameCountRef.current & 3) === 0) {
           updatePlaneTracking(frame, refSpace);
+        }
+
+        // 1b. No-plane fallback — if we've been scanning for 3.5s with no plane,
+        // synthesize an origin 1.5m in front of the camera so the game can start.
+        if (
+          phaseRef.current === 'scanning' &&
+          !originLockedRef.current &&
+          !noPlaneFallbackRef.current &&
+          performance.now() - scanStartedAtRef.current > 3500
+        ) {
+          const vp = frame.getViewerPose(refSpace);
+          if (vp) {
+            const p = vp.transform.position;
+            const o = vp.transform.orientation;
+            // Forward vector from quaternion (negative-Z)
+            const q = new THREE.Quaternion(o.x, o.y, o.z, o.w);
+            const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(q);
+            const origin = new THREE.Vector3(
+              p.x + fwd.x * 1.4,
+              p.y - 0.4,                 // ~hip-height below camera
+              p.z + fwd.z * 1.4,
+            );
+            worldOriginRef.current   = origin;
+            noPlaneFallbackRef.current = true;
+            setPhase('plane-found');
+          }
         }
 
         // 2. Game physics + AI — paused freezes logic but keeps rendering
@@ -1200,6 +1292,58 @@ export function useARGame(): UseARGameResult {
 
   useEffect(() => () => stopAR(), [stopAR]);
 
+  // ── External controls (used by the wave/Wordle meta-state hook) ────────────
+  const setWaveTo = useCallback((n: number) => {
+    setWave(Math.max(1, Math.floor(n)));
+  }, []);
+
+  const externalDamagePlayer = useCallback((amount: number) => {
+    if (amount <= 0) return;
+    hpRef.current = Math.max(0, hpRef.current - amount);
+    setHp(hpRef.current);
+    setDamageTick(x => x + 1);
+    safeVibrate(180);
+    if (hpRef.current <= 0) setPhase('game-over');
+  }, []);
+
+  /**
+   * Hide every currently-active asteroid and remove them from the active list.
+   * Pending respawn timeouts are no-ops because they check `pausedRef`.
+   * Call this from the wave-end bridge so asteroids stop attacking instantly.
+   */
+  const clearActiveAsteroids = useCallback(() => {
+    asteroidsRef.current.forEach(a => {
+      a.alive = false;
+      a.obj.visible = false;
+    });
+    asteroidsRef.current = [];
+  }, []);
+
+  /**
+   * Spawn a fresh wave of asteroids from the pool. Clears any existing ones first
+   * so this is safe to call any time. Used at the start of each wave.
+   */
+  const respawnWave = useCallback((count: number = WAVE_INITIAL_COUNT) => {
+    asteroidsRef.current.forEach(a => {
+      a.alive = false;
+      a.obj.visible = false;
+    });
+    asteroidsRef.current = [];
+    const now = performance.now();
+    for (let i = 0; i < count; i++) spawnFromPool(now);
+  }, []);
+
+  const consumeLetters = useCallback((letters: string[]) => {
+    if (!letters.length) return;
+    const inv = [...collectedLettersRef.current];
+    for (const l of letters) {
+      const idx = inv.indexOf(l.toUpperCase());
+      if (idx !== -1) inv.splice(idx, 1);
+    }
+    collectedLettersRef.current = inv;
+    setCollectedLetters(inv);
+  }, []);
+
   return {
     phase:       phaseState,
     smashed,
@@ -1211,11 +1355,17 @@ export function useARGame(): UseARGameResult {
     isSupported: phaseState !== 'unsupported' && phaseState !== 'checking',
     paused,
     showPlane,
+    collectedLetters,
     startAR,
     startGame,
     stopAR,
     pause,
     resume,
     togglePlane,
+    setWaveTo,
+    damagePlayer: externalDamagePlayer,
+    consumeLetters,
+    clearActiveAsteroids,
+    respawnWave,
   };
 }

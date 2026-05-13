@@ -1,6 +1,20 @@
 import { useNavigate } from 'react-router';
 import { useRef, useEffect, useState } from 'react';
 import { useARGame, GamePhase } from '../hooks/useARGame';
+import { useWaveGame, WAVE_DURATION_MS, BOSS_WAVE_INTERVAL } from '../hooks/useWaveGame';
+import { useCodex } from '../hooks/useCodex';
+import WordlePuzzle from '../components/WordlePuzzle';
+import CelebrationModal, { type CelebrationKind } from '../components/CelebrationModal';
+import { fetchTaunt } from '../services/bossApi';
+
+interface CelebrationData {
+  kind:         CelebrationKind;
+  word:         string;
+  wave:         number;
+  attemptsUsed: number;
+  sealsBroken?: number;
+  sealsTotal?:  number;
+}
 
 const STATUS_LABEL: Record<GamePhase, string> = {
   'checking':    'CHECKING DEVICE...',
@@ -33,11 +47,56 @@ export default function ARPage() {
   const overlayRef  = useRef<HTMLDivElement>(null);
 
   const {
-    phase, smashed, wave, hp, maxHp, damageTick, errorMsg,
-    paused, showPlane,
+    phase, smashed, hp, maxHp, damageTick, errorMsg,
+    paused, showPlane, collectedLetters,
     startAR, startGame, stopAR,
     pause, resume, togglePlane,
+    setWaveTo, damagePlayer,
+    clearActiveAsteroids, respawnWave,
   } = useARGame();
+
+  // Wordle hint via Django AI endpoint
+  const { fetchHint, hint, hintLoading, clearHint } = useCodex();
+
+  // Wave / Wordle / Boss meta-state machine
+  const game = useWaveGame({
+    enabled:      phase === 'playing',
+    onBossAttack: (dmg) => damagePlayer(dmg),
+    onWaveStart:  (waveNum) => {
+      clearHint();
+      // Fresh asteroids for waves > 1 (wave 1 was already seeded by startGame).
+      if (waveNum > 1) respawnWave();
+      resume();
+    },
+    onWaveEnd:    (_w, isBoss) => {
+      // Stop the asteroids attacking THE INSTANT the timer expires.
+      clearActiveAsteroids();
+      pause();
+      clearHint();
+      if (isBoss) fetchTaunt('wave_start', `Boss wave begins`).then(setBossTaunt);
+    },
+  });
+
+  const wave = game.wave;
+  const [bossTaunt,   setBossTaunt]   = useState<string | null>(null);
+  const [celebration, setCelebration] = useState<CelebrationData | null>(null);
+
+  // ── Bridge: kick off wave 1 the moment AR play begins ──
+  useEffect(() => {
+    if (phase === 'playing' && game.metaPhase === 'idle') game.startGame();
+  }, [phase, game.metaPhase, game.startGame]);
+
+  // ── Bridge: keep AR's wave display in sync with wave hook ──
+  useEffect(() => { setWaveTo(game.wave); }, [game.wave, setWaveTo]);
+
+  // ── Bridge: clean up wave state when player dies ──
+  useEffect(() => {
+    if (phase === 'game-over') {
+      game.reset();
+      setBossTaunt(null);
+      fetchTaunt('game_over').then(setBossTaunt);
+    }
+  }, [phase, game.reset]);
 
   const color       = STATUS_COLOR[phase];
   const label       = STATUS_LABEL[phase];
@@ -115,6 +174,35 @@ export default function ARPage() {
         }
       </div>
 
+      {/* ── Wave Timer + Letter Inventory (during active wave) ── */}
+      {isPlaying && game.metaPhase === 'wave-active' && (
+        <div className="absolute top-24 inset-x-0 px-10" style={{ zIndex: 30 }}>
+          <div className="flex items-center justify-between mb-1">
+            <span className="text-[6px] text-white/60 tracking-widest">TIME</span>
+            <span className="text-[6px] tracking-widest" style={{
+              color: game.timeRemainingMs < 10_000 ? '#ef4444' : '#a78bfa',
+              animation: game.timeRemainingMs < 10_000 ? 'blink 0.6s ease-in-out infinite' : 'none',
+            }}>
+              {Math.ceil(game.timeRemainingMs / 1000)}s
+              {wave % BOSS_WAVE_INTERVAL === 0 && ' → BOSS'}
+            </span>
+            <span className="text-[6px] text-[#10b981] tracking-widest">
+              ☕ {collectedLetters.length}
+            </span>
+          </div>
+          <div className="w-full h-1.5 bg-[#1a0a2e]/80 border border-white/10">
+            <div
+              className="h-full transition-all"
+              style={{
+                width: `${(game.timeRemainingMs / WAVE_DURATION_MS) * 100}%`,
+                backgroundColor: game.timeRemainingMs < 10_000 ? '#ef4444' : '#8b5cf6',
+                boxShadow: `0 0 6px ${game.timeRemainingMs < 10_000 ? '#ef4444' : '#8b5cf6'}`,
+              }}
+            />
+          </div>
+        </div>
+      )}
+
       {/* ── HP Bar + Wave indicator (during combat) ── */}
       {(isPlaying || isEnd) && (
         <div className="absolute top-14 inset-x-0 px-10" style={{ zIndex: 30 }}>
@@ -149,23 +237,23 @@ export default function ARPage() {
         />
       )}
 
-      {/* ── Pause button (top-right, only during play) ── */}
-      {isPlaying && !paused && (
+      {/* ── Pause button — bottom-right corner, away from HUD and centred hint text ── */}
+      {isPlaying && !paused && game.metaPhase === 'wave-active' && (
         <button
           onClick={pause}
-          className="absolute top-16 right-6 w-10 h-10 flex items-center justify-center border-2 border-[#a78bfa] bg-[#0a0118]/70 active:scale-95"
-          style={{ zIndex: 35 }}
+          className="absolute bottom-6 right-4 w-11 h-11 flex items-center justify-center border-2 border-[#a78bfa] bg-[#0a0118]/85 active:scale-95 hover:bg-[#1a0a2e]"
+          style={{ zIndex: 35, boxShadow: '0 0 12px #8b5cf677, 0 0 4px #0a0118' }}
           aria-label="Pause"
         >
           <div className="flex gap-1">
-            <div className="w-1.5 h-4 bg-[#a78bfa]"/>
-            <div className="w-1.5 h-4 bg-[#a78bfa]"/>
+            <div className="w-1.5 h-4 bg-[#a78bfa]" />
+            <div className="w-1.5 h-4 bg-[#a78bfa]" />
           </div>
         </button>
       )}
 
-      {/* ── Pause Menu ── */}
-      {isPlaying && paused && (
+      {/* ── Pause Menu (only shown when manually paused mid-wave) ── */}
+      {isPlaying && paused && game.metaPhase === 'wave-active' && (
         <div
           className="absolute inset-0 flex flex-col items-center justify-center gap-5 px-8"
           style={{ zIndex: 60, backgroundColor: 'rgba(10,1,24,0.85)', animation: 'fadeSlide .25s ease-out' }}
@@ -247,7 +335,12 @@ export default function ARPage() {
               </p>
             )}
             {phase === 'error' && (
-              <p className="text-[7px] text-[#ef444488] leading-loose max-w-xs text-center">{errorMsg}</p>
+              <pre
+                className="text-[7px] text-[#ef444488] leading-relaxed max-w-xs text-left whitespace-pre-wrap break-words px-3 py-2 border border-[#ef444444] bg-[#ef44440a]"
+                style={{ fontFamily: "'Press Start 2P', monospace" }}
+              >
+                {errorMsg}
+              </pre>
             )}
             {phase === 'idle' && (
               <p className="text-[7px] text-white/40 leading-loose">
@@ -306,14 +399,85 @@ export default function ARPage() {
           )}
 
           {/* In-game HUD */}
-          {isPlaying && (
+          {isPlaying && game.metaPhase === 'wave-active' && (
             <div className="absolute bottom-10 inset-x-0 text-center"
               style={{ zIndex:30, animation:'fadeSlide .3s ease-out' }}>
               <p className="text-[8px] text-[#ec4899] tracking-widest"
                 style={{ animation:'blink 2.2s ease-in-out infinite' }}>
-                TAP RED ROCKS BEFORE THEY HIT YOU
+                TAP ONLY RED ROCKS · WAIT TO STRIKE
               </p>
             </div>
+          )}
+
+          {/* ── Wordle puzzle overlay (intermission OR boss-fight) ── */}
+          {isPlaying && (game.metaPhase === 'intermission' || game.metaPhase === 'boss-fight') && (
+            <WordlePuzzle
+              variant={game.metaPhase === 'boss-fight' ? 'boss' : 'normal'}
+              title={
+                game.metaPhase === 'boss-fight'
+                  ? `BOSS · WAVE ${wave}`
+                  : `WAVE ${wave} CLEARED`
+              }
+              subtitle={
+                game.metaPhase === 'boss-fight'
+                  ? (bossTaunt ?? 'The Rift Overlord blocks your path. Solve the seals!')
+                  : 'Solve to advance to the next wave'
+              }
+              guess={game.guess}
+              attempts={game.attempts}
+              guessesRemaining={game.guessesRemaining}
+              collectedLetters={collectedLetters}
+              bossWordsLeft={game.bossWordsLeft}
+              bossWordsTotal={game.bossWordsTotal}
+              hp={game.metaPhase === 'boss-fight' ? hp : undefined}
+              maxHp={game.metaPhase === 'boss-fight' ? maxHp : undefined}
+              hint={hint}
+              hintLoading={hintLoading}
+              onAddLetter={game.addLetter}
+              onBackspace={game.backspace}
+              onSubmit={() => {
+                // Capture seal counts BEFORE submit (the hook mutates these on win)
+                const totalBefore = game.bossWordsTotal;
+                const leftBefore  = game.bossWordsLeft;
+                const r = game.submitGuess();
+                if (r.event) {
+                  setCelebration({
+                    kind:         r.event,
+                    word:         r.solvedWord ?? '',
+                    wave:         wave,
+                    attemptsUsed: r.attemptsUsed,
+                    // Show seal progress for boss events
+                    sealsTotal:   totalBefore || undefined,
+                    sealsBroken:  totalBefore
+                      ? totalBefore - leftBefore + 1   // +1 for the seal just broken
+                      : undefined,
+                  });
+                  // Fire a matching boss taunt for AI flavor
+                  if (r.event === 'seal-broken' || r.event === 'boss-defeated') {
+                    fetchTaunt('word_solved', `Solved ${r.solvedWord} in ${r.attemptsUsed}`).then(setBossTaunt);
+                  }
+                }
+              }}
+              onRequestHint={() =>
+                fetchHint(
+                  game.targetWord,
+                  game.attempts.map(a => ({ guess: a.word, colors: a.colors })),
+                )
+              }
+            />
+          )}
+
+          {/* ── Celebration modal — shown briefly when a Wordle is solved ── */}
+          {celebration && (
+            <CelebrationModal
+              kind={celebration.kind}
+              word={celebration.word}
+              wave={celebration.wave}
+              attemptsUsed={celebration.attemptsUsed}
+              sealsBroken={celebration.sealsBroken}
+              sealsTotal={celebration.sealsTotal}
+              onDismiss={() => setCelebration(null)}
+            />
           )}
 
           {/* Game-over overlay */}

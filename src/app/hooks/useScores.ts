@@ -1,11 +1,10 @@
 import { useCallback, useEffect, useState } from 'react';
 
 // ── API base ────────────────────────────────────────────────────────────────
-// Override at build time with VITE_API_BASE in .env or .env.local, e.g.:
-//   VITE_API_BASE=http://192.168.1.42:8000
-// Falls back to localhost:8000 for desktop dev.
-const API_BASE: string =
-  (import.meta as any).env?.VITE_API_BASE ?? 'http://localhost:8000';
+// Defaults to relative '' so fetches go through the Vite dev proxy and avoid
+// mixed-content blocking when the frontend is HTTPS but backend is HTTP.
+// Override at build time with VITE_API_BASE in .env / .env.local for prod.
+const API_BASE: string = (import.meta as any).env?.VITE_API_BASE ?? '';
 
 // ── Types ───────────────────────────────────────────────────────────────────
 export interface Score {

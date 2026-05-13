@@ -30,6 +30,16 @@ export default defineConfig({
     host: true,   // listen on 0.0.0.0 so phones on the same Wi-Fi can connect
     port: 5173,
     https: true,  // required for WebXR from non-localhost origins
+    // Proxy API calls to the Django backend so the HTTPS frontend can reach
+    // the HTTP backend without browser mixed-content blocking. Override the
+    // target with VITE_API_BASE in .env.local if your backend runs elsewhere.
+    proxy: {
+      '/api': {
+        target: process.env.VITE_API_BASE || 'http://localhost:8000',
+        changeOrigin: true,
+        secure: false,
+      },
+    },
   },
   resolve: {
     alias: {

@@ -2,7 +2,10 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework import serializers
 
+from rest_framework.exceptions import NotFound
+
 from .words import WARDEN_CODEX, FINAL_SEAL, pick_random_word
+from .dictionary import get_dictionary, get_entry
 from .ai import generate_hint
 
 
@@ -44,6 +47,27 @@ class AttemptSerializer(serializers.Serializer):
 class HintRequestSerializer(serializers.Serializer):
     word     = serializers.CharField(min_length=5, max_length=5)
     attempts = AttemptSerializer(many=True, required=False, default=list)
+
+
+class DictionaryView(APIView):
+    """GET /api/codex/dictionary/ — full dictionary with definitions, examples, IPA pronunciation."""
+
+    def get(self, _request):
+        entries = get_dictionary()
+        return Response({
+            'entries': entries,
+            'count':   len(entries),
+        })
+
+
+class DictionaryEntryView(APIView):
+    """GET /api/codex/dictionary/<word>/ — single word entry."""
+
+    def get(self, _request, word: str):
+        entry = get_entry(word)
+        if not entry:
+            raise NotFound(f'No entry for "{word}" in the Codex.')
+        return Response(entry)
 
 
 class HintView(APIView):
