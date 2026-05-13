@@ -6,29 +6,68 @@ function seededRand(seed: number): number {
   return x - Math.floor(x);
 }
 
-const SYSTEM_CHECKS = [
-  'CAMERA MODULE',
-  'AR PLANE DETECT',
-  'CODEX LINK',
-  'ENEMY SCANNER',
-] as const;
+type CheckStatus = 'idle' | 'checking' | 'ok' | 'fail';
+
+interface ISystemCheck {
+  label: string;
+  run: () => Promise<void>;
+}
+
+const SYSTEM_CHECKS: ISystemCheck[] = [
+  {
+    label: 'CAMERA MODULE',
+    run: async () => {
+      const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+      stream.getTracks().forEach(t => t.stop());
+    },
+  },
+  {
+    label: 'AR PLANE DETECT',
+    run: async () => {
+      if (!('xr' in navigator)) throw new Error('WebXR not supported');
+      const supported = await (navigator as any).xr.isSessionSupported('immersive-ar');
+      if (!supported) throw new Error('AR not supported');
+    },
+  },
+  {
+    label: 'CODEX LINK',
+    run: async () => {
+      if (!navigator.onLine) throw new Error('No network');
+    },
+  },
+  {
+    label: 'ENEMY SCANNER',
+    run: async () => {
+      if (!('DeviceOrientationEvent' in window)) throw new Error('No motion sensor');
+      await new Promise(res => setTimeout(res, 500));
+    },
+  },
+];
 
 export default function MissionPage() {
   const navigate = useNavigate();
-  const [checkedItems, setCheckedItems] = useState<Set<number>>(new Set());
+  const [statuses, setStatuses] = useState<CheckStatus[]>(SYSTEM_CHECKS.map(() => 'idle'));
   const [ready, setReady] = useState(false);
 
   useEffect(() => {
-    const timers: ReturnType<typeof setTimeout>[] = [];
-    SYSTEM_CHECKS.forEach((_, i) => {
-      timers.push(
-        setTimeout(() => setCheckedItems(prev => new Set([...prev, i])), 400 + i * 620)
-      );
-    });
-    timers.push(
-      setTimeout(() => setReady(true), 400 + SYSTEM_CHECKS.length * 620 + 350)
-    );
-    return () => timers.forEach(clearTimeout);
+    let cancelled = false;
+
+    const runChecks = async () => {
+      for (let i = 0; i < SYSTEM_CHECKS.length; i++) {
+        if (cancelled) return;
+        setStatuses(prev => { const n = [...prev]; n[i] = 'checking'; return n; });
+        try {
+          await SYSTEM_CHECKS[i].run();
+          if (!cancelled) setStatuses(prev => { const n = [...prev]; n[i] = 'ok'; return n; });
+        } catch {
+          if (!cancelled) setStatuses(prev => { const n = [...prev]; n[i] = 'fail'; return n; });
+        }
+      }
+      if (!cancelled) setReady(true);
+    };
+
+    runChecks();
+    return () => { cancelled = true; };
   }, []);
 
   const stars = useMemo(() =>
@@ -212,47 +251,39 @@ export default function MissionPage() {
         <p className="text-[7px] text-[#a78bfa] mb-3 tracking-widest">SYSTEM STATUS</p>
 
         <div className="space-y-2">
-          {SYSTEM_CHECKS.map((label, i) => {
-            const isChecked = checkedItems.has(i);
-            const isLoading = !isChecked && i === checkedItems.size;
+          {SYSTEM_CHECKS.map((check, i) => {
+            const s = statuses[i];
+            const borderColor = s === 'ok' ? '#10b981' : s === 'fail' ? '#ef4444' : s === 'checking' ? '#facc15' : '#1f2937';
+            const textColor   = s === 'ok' ? '#10b981' : s === 'fail' ? '#ef4444' : s === 'checking' ? '#facc15' : '#374151';
             return (
               <div
                 key={i}
                 className="flex items-center gap-2"
-                style={isChecked ? { animation: 'slideIn 0.25s ease-out' } : {}}
+                style={s === 'ok' || s === 'fail' ? { animation: 'slideIn 0.25s ease-out' } : {}}
               >
                 <div
                   className="w-4 h-4 border-2 flex items-center justify-center flex-shrink-0 transition-colors duration-200"
                   style={{
-                    borderColor: isChecked ? '#10b981' : isLoading ? '#facc15' : '#1f2937',
-                    backgroundColor: isChecked ? '#10b981' : 'transparent',
+                    borderColor,
+                    backgroundColor: s === 'ok' ? '#10b981' : s === 'fail' ? '#ef4444' : 'transparent',
                   }}
                 >
-                  {isChecked && (
-                    <span
-                      className="text-[#0a0118] leading-none"
-                      style={{ fontSize: '8px', animation: 'checkPop 0.25s ease-out' }}
-                    >
-                      ✓
-                    </span>
+                  {s === 'ok' && (
+                    <span className="text-[#0a0118] leading-none" style={{ fontSize: '8px', animation: 'checkPop 0.25s ease-out' }}>✓</span>
                   )}
-                  {isLoading && (
-                    <span
-                      className="text-[#facc15] leading-none"
-                      style={{ fontSize: '6px', animation: 'blinkAnim 0.5s ease-in-out infinite' }}
-                    >
-                      ■
-                    </span>
+                  {s === 'fail' && (
+                    <span className="text-[#0a0118] leading-none" style={{ fontSize: '8px', animation: 'checkPop 0.25s ease-out' }}>✕</span>
+                  )}
+                  {s === 'checking' && (
+                    <span className="text-[#facc15] leading-none" style={{ fontSize: '6px', animation: 'blinkAnim 0.5s ease-in-out infinite' }}>■</span>
                   )}
                 </div>
-                <span
-                  className="text-[7px] tracking-wide transition-colors duration-200"
-                  style={{
-                    color: isChecked ? '#10b981' : isLoading ? '#facc15' : '#374151',
-                  }}
-                >
-                  {label}
+                <span className="text-[7px] tracking-wide transition-colors duration-200" style={{ color: textColor }}>
+                  {check.label}
                 </span>
+                {s === 'fail' && (
+                  <span className="text-[6px] text-[#ef444499] ml-auto">FAILED</span>
+                )}
               </div>
             );
           })}
