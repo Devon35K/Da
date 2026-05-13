@@ -1,7 +1,6 @@
 import { useNavigate } from 'react-router';
 import { useRef, useEffect, useState } from 'react';
 import { useARGame, GamePhase } from '../hooks/useARGame';
-import { useHandDetection } from '../hooks/useHandDetection';
 
 const STATUS_LABEL: Record<GamePhase, string> = {
   'checking':    'CHECKING DEVICE...',
@@ -33,30 +32,12 @@ export default function ARPage() {
   const navigate    = useNavigate();
   const overlayRef  = useRef<HTMLDivElement>(null);
 
-  const hand = useHandDetection();
-  const { phase, smashed, wave, hp, maxHp, damageTick, errorMsg, startAR, startGame, stopAR } = useARGame({
-    handLandmarksRef: hand.landmarksRef,
-  });
-
-  // Start hand detection as soon as we enter 'playing'; stop on game-over / exit
-  useEffect(() => {
-    if (phase === 'playing' && !hand.ready && !hand.loading) {
-      hand.start().catch(() => {});
-    }
-    if ((phase === 'idle' || phase === 'game-over') && hand.ready) {
-      hand.stop();
-    }
-  }, [phase, hand]);
-
-  // Landmark overlay state (sampled from ref each frame so the overlay redraws)
-  const [overlayTick, setOverlayTick] = useState(0);
-  useEffect(() => {
-    if (phase !== 'playing') return;
-    let raf = 0;
-    const loop = () => { setOverlayTick(t => (t + 1) % 1000000); raf = requestAnimationFrame(loop); };
-    raf = requestAnimationFrame(loop);
-    return () => cancelAnimationFrame(raf);
-  }, [phase]);
+  const {
+    phase, smashed, wave, hp, maxHp, damageTick, errorMsg,
+    paused, showPlane,
+    startAR, startGame, stopAR,
+    pause, resume, togglePlane,
+  } = useARGame();
 
   const color       = STATUS_COLOR[phase];
   const label       = STATUS_LABEL[phase];
@@ -168,49 +149,66 @@ export default function ARPage() {
         />
       )}
 
-      {/* ── Hand landmark overlay ── */}
-      {isPlaying && hand.ready && (
-        <div className="pointer-events-none absolute inset-0" style={{ zIndex: 40 }}>
-          {hand.landmarksRef.current.map((lm, hi) => (
-            <div key={`h${hi}-${overlayTick & 1}`}>
-              {[4, 8, 12, 16, 20].map(idx => {
-                const p = lm[idx];
-                if (!p) return null;
-                return (
-                  <div
-                    key={idx}
-                    className="absolute rounded-full"
-                    style={{
-                      left: `${p.x * 100}%`,
-                      top:  `${p.y * 100}%`,
-                      width: 18, height: 18,
-                      transform: 'translate(-50%, -50%)',
-                      backgroundColor: '#10b981',
-                      boxShadow: '0 0 14px #10b981, 0 0 6px #10b981',
-                      opacity: 0.85,
-                    }}
-                  />
-                );
-              })}
-            </div>
-          ))}
-        </div>
+      {/* ── Pause button (top-right, only during play) ── */}
+      {isPlaying && !paused && (
+        <button
+          onClick={pause}
+          className="absolute top-16 right-6 w-10 h-10 flex items-center justify-center border-2 border-[#a78bfa] bg-[#0a0118]/70 active:scale-95"
+          style={{ zIndex: 35 }}
+          aria-label="Pause"
+        >
+          <div className="flex gap-1">
+            <div className="w-1.5 h-4 bg-[#a78bfa]"/>
+            <div className="w-1.5 h-4 bg-[#a78bfa]"/>
+          </div>
+        </button>
       )}
 
-      {/* ── Hand detection status badge ── */}
-      {isPlaying && (
+      {/* ── Pause Menu ── */}
+      {isPlaying && paused && (
         <div
-          className="absolute left-10 bottom-24 text-[6px] tracking-widest px-2 py-1 border"
-          style={{
-            zIndex: 30,
-            color:       hand.ready ? '#10b981' : hand.loading ? '#facc15' : '#a78bfa',
-            borderColor: hand.ready ? '#10b981' : hand.loading ? '#facc15' : '#a78bfa',
-          }}
+          className="absolute inset-0 flex flex-col items-center justify-center gap-5 px-8"
+          style={{ zIndex: 60, backgroundColor: 'rgba(10,1,24,0.85)', animation: 'fadeSlide .25s ease-out' }}
         >
-          {hand.error ? `HAND ERR: ${hand.error.slice(0, 20)}`
-          : hand.loading ? 'LOADING HAND AI...'
-          : hand.ready   ? `HANDS: ${hand.handCount}`
-          :                'HAND AI IDLE'}
+          <p className="text-[18px] tracking-widest text-[#a78bfa]">PAUSED</p>
+
+          <div className="flex flex-col gap-3 w-full max-w-xs">
+            <button
+              onClick={resume}
+              className="py-4 text-[10px] border-4 border-[#ec4899] bg-[#8b5cf6] text-white hover:bg-[#a78bfa] transition-colors"
+            >
+              &gt; RESUME &lt;
+            </button>
+
+            <button
+              onClick={togglePlane}
+              className="py-3 text-[9px] border-2 transition-colors"
+              style={{
+                borderColor: showPlane ? '#10b981' : '#facc15',
+                color:       showPlane ? '#10b981' : '#facc15',
+              }}
+            >
+              PLANE: {showPlane ? 'VISIBLE' : 'HIDDEN'}
+            </button>
+
+            <button
+              onClick={async () => { resume(); stopAR(); await new Promise(r => setTimeout(r, 80)); handleStartAR(); }}
+              className="py-3 text-[9px] border-2 border-white/40 text-white/80 hover:text-white transition-colors"
+            >
+              RESTART
+            </button>
+
+            <button
+              onClick={handleExit}
+              className="py-3 text-[9px] border-2 border-white/20 text-white/60 hover:text-white/90 transition-colors"
+            >
+              EXIT TO MISSION
+            </button>
+          </div>
+
+          <p className="text-[6px] text-white/40 tracking-widest mt-2">
+            KILLS {smashed} · WAVE {wave} · HP {hp}/{maxHp}
+          </p>
         </div>
       )}
 

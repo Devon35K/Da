@@ -1,6 +1,5 @@
 import { useRef, useState, useCallback, useEffect } from 'react';
 import * as THREE from 'three';
-import type { HandLandmark } from './useHandDetection';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 export type GamePhase =
@@ -42,9 +41,10 @@ interface GameAsteroid {
 }
 
 interface TrackedPlane {
-  center:      THREE.Vector3;
-  area:        number;
-  orientation: string;
+  center:       THREE.Vector3;
+  area:         number;
+  orientation:  string;
+  worldPolygon: THREE.Vector3[];   // polygon corners in world space
 }
 
 export interface UseARGameResult {
@@ -56,9 +56,14 @@ export interface UseARGameResult {
   damageTick:  number;
   errorMsg:    string;
   isSupported: boolean;
+  paused:      boolean;
+  showPlane:   boolean;
   startAR:     (overlayEl?: HTMLElement) => Promise<void>;
   startGame:   () => Promise<void>;
   stopAR:      () => void;
+  pause:       () => void;
+  resume:      () => void;
+  togglePlane: () => void;
 }
 
 // ── Tunables ─────────────────────────────────────────────────────────────────
@@ -87,23 +92,20 @@ const CURVE_FORCE           = 0.00055;
 const FBX_PATH              = '/models/asteroid.fbx';
 const TEXTURE_BASE          = '/models/1K/';
 
-// Hand-smash proximity in NDC space (-1..1 is full screen, so 0.16 ≈ 16% of half-screen)
-const HAND_SMASH_NDC_RADIUS = 0.16;
-// Fingertip landmark indices per MediaPipe hand model
-const FINGERTIP_IDX = [4, 8, 12, 16, 20] as const;
-
-export interface UseARGameOptions {
-  handLandmarksRef?: React.MutableRefObject<HandLandmark[][]>;
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
-export function useARGame(opts: UseARGameOptions = {}): UseARGameResult {
+export function useARGame(): UseARGameResult {
   const [phaseState, setPhaseState] = useState<GamePhase>('checking');
   const [smashed,    setSmashed]    = useState(0);
   const [wave,       setWave]       = useState(1);
   const [hp,         setHp]         = useState(MAX_HP);
   const [damageTick, setDamageTick] = useState(0);
   const [errorMsg,   setErrorMsg]   = useState('');
+  const [paused,     setPausedState] = useState(false);
+  const [showPlane,  setShowPlaneState] = useState(true);
+
+  const pausedRef     = useRef(false);
+  const showPlaneRef  = useRef(true);
+  const frameCountRef = useRef(0);
 
   // Refs mirror state for the animation-loop closure
   const phaseRef   = useRef<GamePhase>('checking');
@@ -123,6 +125,7 @@ export function useARGame(opts: UseARGameOptions = {}): UseARGameResult {
   const particlesRef        = useRef<ParticleSystem[]>([]);
   const trackedPlanesRef    = useRef<Map<any, TrackedPlane>>(new Map());
   const planeMeshesRef      = useRef<Map<any, { outline: THREE.LineLoop; fill: THREE.Mesh }>>(new Map());
+  const bestPlaneRef        = useRef<TrackedPlane | null>(null);
   const worldOriginRef      = useRef<THREE.Vector3 | null>(null);
   const originLockedRef     = useRef(false);
   const raycasterRef        = useRef(new THREE.Raycaster());
@@ -256,15 +259,22 @@ export function useARGame(opts: UseARGameOptions = {}): UseARGameResult {
     const s = targetDiameter / templateMaxDimRef.current;
     clone.scale.setScalar(s);
 
-    // Random position in a donut around world origin
+    // Pick a random point INSIDE the detected plane polygon (fallback: donut around origin)
+    const planePt = samplePointOnPlane();
     const angle  = Math.random() * Math.PI * 2;
-    const radius = SPAWN_RADIUS_MIN + Math.random() * (SPAWN_RADIUS_MAX - SPAWN_RADIUS_MIN);
-    const spawnHeight = origin.y + SPAWN_HEIGHT_BASE + Math.random() * SPAWN_HEIGHT_RANGE;
-    clone.position.set(
-      origin.x + Math.cos(angle) * radius,
-      spawnHeight,
-      origin.z + Math.sin(angle) * radius,
-    );
+    let spawnHeight: number;
+    if (planePt) {
+      clone.position.set(planePt.x, planePt.y, planePt.z);
+      spawnHeight = planePt.y;
+    } else {
+      const radius = SPAWN_RADIUS_MIN + Math.random() * (SPAWN_RADIUS_MAX - SPAWN_RADIUS_MIN);
+      spawnHeight = origin.y + SPAWN_HEIGHT_BASE + Math.random() * SPAWN_HEIGHT_RANGE;
+      clone.position.set(
+        origin.x + Math.cos(angle) * radius,
+        spawnHeight,
+        origin.z + Math.sin(angle) * radius,
+      );
+    }
     clone.rotation.set(Math.random()*Math.PI, Math.random()*Math.PI, Math.random()*Math.PI);
     scene.add(clone);
 
@@ -286,9 +296,10 @@ export function useARGame(opts: UseARGameOptions = {}): UseARGameResult {
                       ),
       nextAttackTime: now + FIRST_ATTACK_DELAY_MS + Math.random()*(MAX_ATTACK_DELAY_MS-MIN_ATTACK_DELAY_MS),
       stateTimer:     0,
-      orbitCenter:    origin.clone(),
+      // Bob in place near spawn (tiny orbit so it stays on the plane)
+      orbitCenter:    clone.position.clone(),
       orbitAngle:     angle,
-      orbitRadius:    radius,
+      orbitRadius:    0.04 + Math.random() * 0.06,   // 4-10 cm gentle wobble
       spawnHeight,
       alive:          true,
     };
@@ -387,9 +398,18 @@ export function useARGame(opts: UseARGameOptions = {}): UseARGameResult {
       }
       area = Math.abs(area) / 2;
 
+      // Transform polygon points to world space using the plane's pose
+      const poseMat = new THREE.Matrix4().fromArray(pose.transform.matrix);
+      const worldPolygon: THREE.Vector3[] = poly.map(pt => {
+        const v = new THREE.Vector3(pt.x, 0, pt.z);
+        v.applyMatrix4(poseMat);
+        return v;
+      });
+
       trackedPlanesRef.current.set(xrPlane, {
         center, area,
         orientation: (xrPlane.orientation as string) ?? 'unknown',
+        worldPolygon,
       });
 
       // ── Build/refresh visual mesh for THIS plane ──
@@ -423,18 +443,34 @@ export function useARGame(opts: UseARGameOptions = {}): UseARGameResult {
         visual = { outline, fill };
         planeMeshesRef.current.set(xrPlane, visual);
       } else {
-        // Polygon may have grown — refresh geometry
-        const outlineGeo = visual.outline.geometry as THREE.BufferGeometry;
-        outlineGeo.setFromPoints(pts3);
-        outlineGeo.attributes.position.needsUpdate = true;
+        // Perf: only allocate new buffers when vertex count CHANGES.
+        // Same count → in-place write (zero GC pressure).
+        const outArr = visual.outline.geometry.attributes.position.array as Float32Array;
+        if (outArr.length === pts3.length * 3) {
+          for (let i = 0; i < pts3.length; i++) {
+            outArr[i*3]   = pts3[i].x;
+            outArr[i*3+1] = pts3[i].y;
+            outArr[i*3+2] = pts3[i].z;
+          }
+          visual.outline.geometry.attributes.position.needsUpdate = true;
 
-        const fillGeo = visual.fill.geometry as THREE.BufferGeometry;
-        const positions = new Float32Array(pts3.length * 3);
-        pts3.forEach((v, i) => { positions[i*3]=v.x; positions[i*3+1]=v.y; positions[i*3+2]=v.z; });
-        fillGeo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-        const indices: number[] = [];
-        for (let i = 1; i < pts3.length - 1; i++) indices.push(0, i, i + 1);
-        fillGeo.setIndex(indices);
+          const fillArr = visual.fill.geometry.attributes.position.array as Float32Array;
+          for (let i = 0; i < pts3.length; i++) {
+            fillArr[i*3]   = pts3[i].x;
+            fillArr[i*3+1] = pts3[i].y;
+            fillArr[i*3+2] = pts3[i].z;
+          }
+          visual.fill.geometry.attributes.position.needsUpdate = true;
+        } else {
+          // Vertex count changed → must reallocate + reindex
+          const positions = new Float32Array(pts3.length * 3);
+          pts3.forEach((v, i) => { positions[i*3]=v.x; positions[i*3+1]=v.y; positions[i*3+2]=v.z; });
+          visual.outline.geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+          visual.fill.geometry.setAttribute('position', new THREE.BufferAttribute(positions.slice(), 3));
+          const indices: number[] = [];
+          for (let i = 1; i < pts3.length - 1; i++) indices.push(0, i, i + 1);
+          visual.fill.geometry.setIndex(indices);
+        }
       }
 
       // Apply plane pose matrix to both meshes (plane-local → world)
@@ -442,7 +478,9 @@ export function useARGame(opts: UseARGameOptions = {}): UseARGameResult {
       visual.outline.matrix.copy(m); visual.outline.matrixAutoUpdate = false; visual.outline.updateMatrixWorld(true);
       visual.fill.matrix.copy(m);    visual.fill.matrixAutoUpdate    = false; visual.fill.updateMatrixWorld(true);
 
-      // Update opacity for current phase
+      // Visibility (toggle) + opacity for current phase
+      visual.outline.visible = showPlaneRef.current;
+      visual.fill.visible    = showPlaneRef.current;
       (visual.outline.material as THREE.LineBasicMaterial).opacity = visOpacity;
       (visual.fill.material    as THREE.MeshBasicMaterial).opacity = visOpacity * 0.18;
     });
@@ -472,11 +510,48 @@ export function useARGame(opts: UseARGameOptions = {}): UseARGameResult {
 
     if (best) {
       const b = best as TrackedPlane;
+      // Always keep bestPlaneRef updated so asteroid spawns use latest polygon
+      bestPlaneRef.current = b;
       if (!originLockedRef.current) {
         worldOriginRef.current = b.center.clone();
         if (phaseRef.current === 'scanning') setPhase('plane-found');
       }
     }
+  };
+
+  // 9b. Random point INSIDE the detected plane polygon (XZ), with hover height
+  const samplePointOnPlane = (): { x: number; y: number; z: number } | null => {
+    const plane = bestPlaneRef.current;
+    if (!plane || plane.worldPolygon.length < 3) return null;
+    const poly = plane.worldPolygon;
+
+    // Bounding box in XZ
+    let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
+    for (const p of poly) {
+      if (p.x < minX) minX = p.x; if (p.x > maxX) maxX = p.x;
+      if (p.z < minZ) minZ = p.z; if (p.z > maxZ) maxZ = p.z;
+    }
+
+    // Rejection sampling — try up to 40 attempts
+    for (let attempt = 0; attempt < 40; attempt++) {
+      const x = minX + Math.random() * (maxX - minX);
+      const z = minZ + Math.random() * (maxZ - minZ);
+
+      // Point-in-polygon (ray casting)
+      let inside = false;
+      for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+        const xi = poly[i].x, zi = poly[i].z;
+        const xj = poly[j].x, zj = poly[j].z;
+        if (((zi > z) !== (zj > z)) && (x < (xj - xi) * (z - zi) / (zj - zi) + xi)) {
+          inside = !inside;
+        }
+      }
+      if (inside) {
+        return { x, y: plane.center.y + SPAWN_HEIGHT_BASE + Math.random() * SPAWN_HEIGHT_RANGE, z };
+      }
+    }
+    // Fallback: plane centroid
+    return { x: plane.center.x, y: plane.center.y + SPAWN_HEIGHT_BASE, z: plane.center.z };
   };
 
   // 10. Physics / AI update ---------------------------------------------------
@@ -578,55 +653,21 @@ export function useARGame(opts: UseARGameOptions = {}): UseARGameResult {
           a.baseMat.emissiveIntensity = 0;
           a.velocity.set(0, 0, 0);
           a.angularVel.multiplyScalar(1 / 2.4);
+          // Sample a fresh plane point so missed attackers reset onto the plane
+          const resetPt = samplePointOnPlane();
+          if (resetPt) {
+            a.obj.position.set(resetPt.x, resetPt.y, resetPt.z);
+            a.orbitCenter.set(resetPt.x, resetPt.y, resetPt.z);
+            a.spawnHeight = resetPt.y;
+          } else {
+            a.spawnHeight = (worldOriginRef.current?.y ?? 0) + SPAWN_HEIGHT_BASE + Math.random() * SPAWN_HEIGHT_RANGE;
+          }
           a.orbitAngle     = Math.random() * Math.PI * 2;
-          a.orbitRadius    = SPAWN_RADIUS_MIN + Math.random() * (SPAWN_RADIUS_MAX - SPAWN_RADIUS_MIN);
-          a.spawnHeight    = (worldOriginRef.current?.y ?? 0) + SPAWN_HEIGHT_BASE + Math.random() * SPAWN_HEIGHT_RANGE;
+          a.orbitRadius    = 0.04 + Math.random() * 0.06;
           a.nextAttackTime = now + MIN_ATTACK_DELAY_MS + Math.random() * (MAX_ATTACK_DELAY_MS - MIN_ATTACK_DELAY_MS);
         }
       }
     });
-  };
-
-  // 10b. Hand-smash: fingertip overlaps asteroid screen position --------------
-  const checkHandSmash = (renderer: THREE.WebGLRenderer) => {
-    const lmRef = opts.handLandmarksRef;
-    if (!lmRef || !lmRef.current || lmRef.current.length === 0) return;
-    if (asteroidsRef.current.length === 0) return;
-
-    const xrCam = renderer.xr.getCamera();
-    const cam   = (xrCam as any).cameras?.length > 0
-      ? (xrCam as any).cameras[0] as THREE.PerspectiveCamera
-      : cameraRef.current;
-    if (!cam) return;
-
-    // Project every asteroid to NDC once
-    const projections: Array<{ a: GameAsteroid; x: number; y: number }> = [];
-    asteroidsRef.current.forEach(a => {
-      const v = a.obj.position.clone().project(cam);
-      if (v.z > 1) return; // behind camera / clipped
-      projections.push({ a, x: v.x, y: v.y });
-    });
-
-    const hands = lmRef.current;
-    for (let h = 0; h < hands.length; h++) {
-      const hand = hands[h];
-      for (let f = 0; f < FINGERTIP_IDX.length; f++) {
-        const tip = hand[FINGERTIP_IDX[f]];
-        if (!tip) continue;
-        const tipNdcX = tip.x * 2 - 1;
-        const tipNdcY = -(tip.y * 2 - 1);
-
-        for (let i = projections.length - 1; i >= 0; i--) {
-          const p = projections[i];
-          const dx = p.x - tipNdcX;
-          const dy = p.y - tipNdcY;
-          if (dx * dx + dy * dy < HAND_SMASH_NDC_RADIUS * HAND_SMASH_NDC_RADIUS) {
-            killAsteroid(p.a, true);
-            projections.splice(i, 1);
-          }
-        }
-      }
-    }
   };
 
   // 11. Particle update -------------------------------------------------------
@@ -701,6 +742,7 @@ export function useARGame(opts: UseARGameOptions = {}): UseARGameResult {
     particlesRef.current = [];
     trackedPlanesRef.current.clear();
     clearPlaneMeshes();
+    bestPlaneRef.current    = null;
     worldOriginRef.current  = null;
     originLockedRef.current = false;
   }, [handleTap]);
@@ -714,6 +756,7 @@ export function useARGame(opts: UseARGameOptions = {}): UseARGameResult {
     setWave(1);
     originLockedRef.current = false;
     trackedPlanesRef.current.clear();
+    bestPlaneRef.current = null;
 
     try {
       const canvas = document.createElement('canvas');
@@ -721,21 +764,27 @@ export function useARGame(opts: UseARGameOptions = {}): UseARGameResult {
       document.body.appendChild(canvas);
       canvasRef.current = canvas;
 
-      const renderer = new THREE.WebGLRenderer({ canvas, alpha: true, antialias: true });
+      // Perf: cap DPR (phones often have DPR=3 which triples fragment work)
+      const dpr = Math.min(window.devicePixelRatio, 1.5);
+      const renderer = new THREE.WebGLRenderer({
+        canvas,
+        alpha:           true,
+        antialias:       dpr < 1.3,           // skip MSAA on dense displays
+        powerPreference: 'high-performance',
+      });
       renderer.xr.enabled = true;
-      renderer.setPixelRatio(window.devicePixelRatio);
+      renderer.setPixelRatio(dpr);
       renderer.setSize(window.innerWidth, window.innerHeight);
       renderer.outputColorSpace    = THREE.SRGBColorSpace;
       renderer.toneMapping         = THREE.ACESFilmicToneMapping;
       renderer.toneMappingExposure = 1.1;
       rendererRef.current = renderer;
 
-      // Scene + 3-point lighting for rocks
+      // Scene + 2-point lighting (rim removed for perf, ambient boosted)
       const scene = new THREE.Scene();
-      scene.add(new THREE.AmbientLight(0xffffff, 0.8));
-      const key  = new THREE.DirectionalLight(0xfff1d6, 3.2); key.position.set(2, 4, 2);  scene.add(key);
+      scene.add(new THREE.AmbientLight(0xffffff, 1.1));
+      const key  = new THREE.DirectionalLight(0xfff1d6, 3.0); key.position.set(2, 4, 2);   scene.add(key);
       const fill = new THREE.DirectionalLight(0x88aaff, 1.0); fill.position.set(-2, 2, -1); scene.add(fill);
-      const rim  = new THREE.DirectionalLight(0xffffff, 0.8); rim.position.set(0, 1, -3);  scene.add(rim);
       sceneRef.current = scene;
 
       const camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.01, 100);
@@ -762,16 +811,18 @@ export function useARGame(opts: UseARGameOptions = {}): UseARGameResult {
       // ── Master animation loop ──────────────────────────────────────────────
       renderer.setAnimationLoop((_time: number, frame: any) => {
         if (!frame) return;
+        frameCountRef.current++;
 
-        // 1. Continuous plane tracking (XROrigin-like)
-        updatePlaneTracking(frame, refSpace);
+        // 1. Plane tracking — throttled to ~15 Hz (every 4th frame)
+        if ((frameCountRef.current & 3) === 0) {
+          updatePlaneTracking(frame, refSpace);
+        }
 
-        // 2. Game physics + AI
-        if (phaseRef.current === 'playing') {
+        // 2. Game physics + AI — paused freezes logic but keeps rendering
+        if (phaseRef.current === 'playing' && !pausedRef.current) {
           const now = performance.now();
           const t   = now * 0.001;
           updateAsteroids(frame, refSpace, now, t);
-          checkHandSmash(renderer);
           updateParticles(scene);
         }
 
@@ -787,6 +838,7 @@ export function useARGame(opts: UseARGameOptions = {}): UseARGameResult {
         particlesRef.current = [];
         trackedPlanesRef.current.clear();
         clearPlaneMeshes();
+        bestPlaneRef.current    = null;
         worldOriginRef.current  = null;
         originLockedRef.current = false;
         setPhase('idle');
@@ -802,6 +854,25 @@ export function useARGame(opts: UseARGameOptions = {}): UseARGameResult {
     }
   };
 
+  // Pause / Resume / Plane toggle --------------------------------------------
+  const pause = useCallback(() => {
+    pausedRef.current = true;
+    setPausedState(true);
+  }, []);
+  const resume = useCallback(() => {
+    pausedRef.current = false;
+    setPausedState(false);
+  }, []);
+  const togglePlane = useCallback(() => {
+    const next = !showPlaneRef.current;
+    showPlaneRef.current = next;
+    setShowPlaneState(next);
+    planeMeshesRef.current.forEach(vis => {
+      vis.outline.visible = next;
+      vis.fill.visible    = next;
+    });
+  }, []);
+
   useEffect(() => () => stopAR(), [stopAR]);
 
   return {
@@ -813,8 +884,13 @@ export function useARGame(opts: UseARGameOptions = {}): UseARGameResult {
     damageTick,
     errorMsg,
     isSupported: phaseState !== 'unsupported' && phaseState !== 'checking',
+    paused,
+    showPlane,
     startAR,
     startGame,
     stopAR,
+    pause,
+    resume,
+    togglePlane,
   };
 }
