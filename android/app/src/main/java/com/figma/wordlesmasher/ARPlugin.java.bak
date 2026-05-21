@@ -1,0 +1,2 @@
+// Backup of the original polling-based ARPlugin. Safe to delete once the new
+// hybrid (GLSurfaceView + arFrame events) implementation is verified on-device.

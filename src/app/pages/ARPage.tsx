@@ -1,5 +1,6 @@
 import { useNavigate } from 'react-router';
 import { useRef, useEffect, useState } from 'react';
+import { Capacitor } from '@capacitor/core';
 import { useARGame, GamePhase } from '../hooks/useARGame';
 import { useWaveGame, WAVE_DURATION_MS, BOSS_WAVE_INTERVAL } from '../hooks/useWaveGame';
 import { useCodex } from '../hooks/useCodex';
@@ -8,6 +9,7 @@ import CelebrationModal, { type CelebrationKind } from '../components/Celebratio
 import { fetchTaunt } from '../services/bossApi';
 import WaveMap from '../components/WaveMap';
 import { useScores } from '../hooks/useScores';
+import ARPlugin from '../../plugins/ar-plugin';
 
 interface CelebrationData {
   kind:         CelebrationKind;
@@ -104,6 +106,7 @@ export default function ARPage() {
   const [playerName,   setPlayerName]   = useState('WARDEN');
   const [scoreSubmitted, setScoreSubmitted] = useState(false);
   const [durationSeconds, setDurationSeconds] = useState(0);
+  const [isVirtualMode, setIsVirtualMode] = useState(false);
   const swipeRef = useRef<{ x: number; y: number; t: number } | null>(null);
   const wordsSolvedRef    = useRef(0);
   const gameStartTimeRef  = useRef<number | null>(null);
@@ -123,6 +126,19 @@ export default function ARPage() {
 
   // ── Keep a ref snapshot of the current wave (for game-over capture) ──
   useEffect(() => { waveSnapshot.current = game.wave; }, [game.wave]);
+
+  // ── Check AR support on native Android to enable virtual mode fallback ──
+  useEffect(() => {
+    if (Capacitor.isNativePlatform() && Capacitor.getPlatform() === 'android') {
+      ARPlugin.checkARSupport().then(result => {
+        if (!result.supported) {
+          setIsVirtualMode(true);
+        }
+      }).catch(() => {
+        setIsVirtualMode(true);
+      });
+    }
+  }, []);
 
   // ── 3-2-1 countdown after each wave transition (not on initial start) ──
   useEffect(() => {
@@ -268,10 +284,17 @@ export default function ARPage() {
         <button onClick={handleExit} className="text-[8px] transition-colors"
           style={{ color: isARLive ? '#ffffffcc' : '#a78bfa' }}>← EXIT</button>
 
-        <div className="text-[7px] px-2 py-1 border" style={{
-          color, borderColor: color,
-          animation: (isARLive && phase !== 'plane-found' && !isPlaying) ? 'blink 1s ease-in-out infinite' : 'none',
-        }}>{label}</div>
+        <div className="flex items-center gap-2">
+          <div className="text-[7px] px-2 py-1 border" style={{
+            color, borderColor: color,
+            animation: (isARLive && phase !== 'plane-found' && !isPlaying) ? 'blink 1s ease-in-out infinite' : 'none',
+          }}>{label}</div>
+          {isVirtualMode && isARLive && (
+            <div className="text-[6px] px-1.5 py-0.5 border border-[#a78bfa] text-[#a78bfa]">
+              VIRTUAL
+            </div>
+          )}
+        </div>
 
         {(isPlaying || isEnd)
           ? <div className="text-[7px] text-[#ec4899]">KILLS {smashed}</div>
@@ -480,6 +503,9 @@ export default function ARPage() {
                     style={{ boxShadow:'0 0 24px #10b98166' }}/>
                   <p className="text-[7px] text-[#10b981] mt-2 tracking-widest"
                     style={{ animation:'blink 1.5s ease-in-out infinite' }}>SURFACE LOCKED</p>
+                  {isVirtualMode && (
+                    <p className="text-[6px] text-[#a78bfa] mt-1 tracking-widest">(VIRTUAL MODE)</p>
+                  )}
                 </div>
               ) : (
                 <div className="flex flex-col items-center gap-3">
@@ -534,11 +560,11 @@ export default function ARPage() {
           {/* Scanning guidance banner (bottom) */}
           {phase === 'scanning' && (
             <div
-              className="absolute inset-x-0 flex justify-center px-8 pointer-events-none"
+              className="absolute inset-x-0 flex flex-col items-center justify-center px-8 gap-3"
               style={{ bottom:'5rem', zIndex:30 }}
             >
               <div
-                className="border px-5 py-2 text-center"
+                className="border px-5 py-2 text-center pointer-events-none"
                 style={{
                   borderColor:'#facc1555',
                   backgroundColor:'rgba(250,204,21,0.05)',
@@ -549,6 +575,16 @@ export default function ARPage() {
                   ▼ HORIZONTAL SURFACES ONLY · MOVE DEVICE SLOWLY ▼
                 </p>
               </div>
+
+              {/* Virtual mode indicator - fallback happens automatically after 1.5s */}
+              {isVirtualMode && (
+                <div
+                  className="px-4 py-2 text-[8px] border border-[#a78bfa] bg-[#a78bfa]/20 text-[#a78bfa]"
+                  style={{ animation:'fadeSlide .5s ease-out' }}
+                >
+                  ℹ️ AUTO-FALLBACK: Placing virtual surface in 1.5s...
+                </div>
+              )}
             </div>
           )}
 

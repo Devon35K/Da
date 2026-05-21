@@ -3,6 +3,8 @@ package com.figma.wordlesmasher;
 import android.Manifest;
 import android.content.pm.PackageManager;
 import android.os.Bundle;
+import android.graphics.Color;
+import android.view.View;
 import android.webkit.WebChromeClient;
 import android.webkit.WebView;
 import androidx.core.app.ActivityCompat;
@@ -19,8 +21,8 @@ public class MainActivity extends BridgeActivity {
     public void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         requestCameraPermission();
-        
-        // Configure WebView for WebXR support
+
+        // Configure WebView for WebXR support and transparency for ARCore camera
         try {
             WebView webView = this.getBridge().getWebView();
             if (webView != null) {
@@ -28,6 +30,10 @@ public class MainActivity extends BridgeActivity {
                 webView.getSettings().setJavaScriptEnabled(true);
                 webView.getSettings().setMediaPlaybackRequiresUserGesture(false);
                 webView.setWebChromeClient(new WebChromeClient());
+
+                // Make WebView transparent so ARCore camera feed shows through
+                webView.setBackgroundColor(Color.TRANSPARENT);
+                webView.setLayerType(View.LAYER_TYPE_HARDWARE, null);
             }
         } catch (Exception e) {
             // WebView configuration failed

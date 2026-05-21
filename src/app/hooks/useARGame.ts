@@ -7,6 +7,7 @@ import {
 } from '../data/wardenCodex';
 import { safeVibrate } from './useSettings';
 import { sfxDestroy, sfxDash, sfxDamage } from '../utils/sfx';
+import ARPlugin, { ARFrameData } from '../../plugins/ar-plugin';
 // GLB assets — Vite resolves these to URL strings at build time
 import asteroidUrl          from '../../3dmodel/asteroid.glb?url';
 import asteroid01Url        from '../../3dmodel/asteroid_01.glb?url';
@@ -215,14 +216,28 @@ export function useARGame(): UseARGameResult {
   /** True during the brief invulnerability window after a dodge. */
   const dodgeActiveRef      = useRef(false);
 
+  // Native ARCore mode refs (used when Capacitor.isNativePlatform && Android)
+  const arFrameListenerRef   = useRef<((data: ARFrameData) => void) | null>(null);
+  const latestARFrameRef     = useRef<ARFrameData | null>(null);
+  const isNativeARModeRef    = useRef(false);
+
+  const isNative = Capacitor.isNativePlatform();
+  const isAndroid = Capacitor.getPlatform() === 'android';
+  const useNativeAR = isNative && isAndroid;
+
   // 1. Support check -----------------------------------------------------------
   useEffect(() => {
+    if (useNativeAR) {
+      // Native Android: ARCore support is checked in useARPlaneDetection
+      setPhase('idle');
+      return;
+    }
     const xr = (navigator as any).xr;
     if (!xr) { setPhase('unsupported'); return; }
     xr.isSessionSupported('immersive-ar')
       .then((ok: boolean) => setPhase(ok ? 'idle' : 'unsupported'))
       .catch(() => setPhase('unsupported'));
-  }, []);
+  }, [useNativeAR]);
 
   // 2. Fallback procedural asteroid -------------------------------------------
   const buildFallbackAsteroid = (): THREE.Object3D => {
@@ -1132,7 +1147,294 @@ export function useARGame(): UseARGameResult {
     bestPlaneRef.current    = null;
     worldOriginRef.current  = null;
     originLockedRef.current = false;
+
+    // Native AR cleanup
+    if (arFrameListenerRef.current) {
+      ARPlugin.removeListener('arFrame', arFrameListenerRef.current).catch(console.error);
+      arFrameListenerRef.current = null;
+    }
+    isNativeARModeRef.current = false;
+    latestARFrameRef.current = null;
   }, [handleTap]);
+
+  // 13b. Native ARCore plane tracking (uses ARCore data from arFrame events)
+  const updateNativePlaneTracking = (data: ARFrameData) => {
+    const scene = sceneRef.current;
+    if (!scene) return;
+
+    const visOpacity = phaseRef.current === 'playing' ? 0.25 : 0.85;
+    const still = new Set<number>();
+
+    data.planes.forEach((p) => {
+      still.add(p.id);
+      const center = new THREE.Vector3(p.centerX, p.centerY, p.centerZ);
+      const poseMat = new THREE.Matrix4().fromArray(p.poseMatrix);
+
+      // Compute area from polygon (shoelace in XZ)
+      const polyXZ = p.polygonXZ;
+      let area = 0;
+      if (polyXZ && polyXZ.length >= 6) {
+        for (let i = 0; i < polyXZ.length - 2; i += 2) {
+          const x1 = polyXZ[i], z1 = polyXZ[i + 1];
+          const x2 = polyXZ[i + 2], z2 = polyXZ[i + 3];
+          area += x1 * z2 - x2 * z1;
+        }
+        area = Math.abs(area) / 2;
+      }
+
+      // Transform polygon to world space using pose matrix
+      const worldPolygon: THREE.Vector3[] = [];
+      if (polyXZ && polyXZ.length >= 6) {
+        for (let i = 0; i < polyXZ.length - 2; i += 2) {
+          const v = new THREE.Vector3(polyXZ[i], 0, polyXZ[i + 1]);
+          v.applyMatrix4(poseMat);
+          worldPolygon.push(v);
+        }
+      }
+
+      const orientation = p.orientation.toLowerCase().includes('horizontal')
+        ? 'horizontal'
+        : p.orientation.toLowerCase().includes('vertical')
+        ? 'vertical'
+        : 'unknown';
+
+      trackedPlanesRef.current.set(p.id, {
+        center, area, orientation, worldPolygon,
+      });
+
+      // Build/refresh visual mesh
+      let visual = planeMeshesRef.current.get(p.id);
+      const pts3 = worldPolygon.length > 0 ? worldPolygon : [
+        new THREE.Vector3(-0.5, 0, -0.5),
+        new THREE.Vector3(0.5, 0, -0.5),
+        new THREE.Vector3(0.5, 0, 0.5),
+        new THREE.Vector3(-0.5, 0, 0.5),
+      ];
+
+      if (!visual) {
+        const outlineGeo = new THREE.BufferGeometry().setFromPoints(pts3);
+        const outlineMat = new THREE.LineBasicMaterial({
+          color: 0x10b981, transparent: true, opacity: visOpacity,
+        });
+        const outline = new THREE.LineLoop(outlineGeo, outlineMat);
+
+        const fillGeo = new THREE.BufferGeometry();
+        const positions = new Float32Array(pts3.length * 3);
+        pts3.forEach((v, i) => { positions[i*3]=v.x; positions[i*3+1]=v.y; positions[i*3+2]=v.z; });
+        fillGeo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+        const indices: number[] = [];
+        for (let i = 1; i < pts3.length - 1; i++) indices.push(0, i, i + 1);
+        fillGeo.setIndex(indices);
+        fillGeo.computeVertexNormals();
+        const fillMat = new THREE.MeshBasicMaterial({
+          color: 0x10b981, transparent: true, opacity: visOpacity * 0.18,
+          side: THREE.DoubleSide, depthWrite: false,
+        });
+        const fill = new THREE.Mesh(fillGeo, fillMat);
+
+        scene.add(outline);
+        scene.add(fill);
+        visual = { outline, fill };
+        planeMeshesRef.current.set(p.id, visual);
+      } else {
+        // Update vertices if count changed
+        const outArr = visual.outline.geometry.attributes.position.array as Float32Array;
+        if (outArr.length === pts3.length * 3) {
+          for (let i = 0; i < pts3.length; i++) {
+            outArr[i*3]   = pts3[i].x;
+            outArr[i*3+1] = pts3[i].y;
+            outArr[i*3+2] = pts3[i].z;
+          }
+          visual.outline.geometry.attributes.position.needsUpdate = true;
+
+          const fillArr = visual.fill.geometry.attributes.position.array as Float32Array;
+          for (let i = 0; i < pts3.length; i++) {
+            fillArr[i*3]   = pts3[i].x;
+            fillArr[i*3+1] = pts3[i].y;
+            fillArr[i*3+2] = pts3[i].z;
+          }
+          visual.fill.geometry.attributes.position.needsUpdate = true;
+        } else {
+          const positions = new Float32Array(pts3.length * 3);
+          pts3.forEach((v, i) => { positions[i*3]=v.x; positions[i*3+1]=v.y; positions[i*3+2]=v.z; });
+          visual.outline.geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+          visual.fill.geometry.setAttribute('position', new THREE.BufferAttribute(positions.slice(), 3));
+          const indices: number[] = [];
+          for (let i = 1; i < pts3.length - 1; i++) indices.push(0, i, i + 1);
+          visual.fill.geometry.setIndex(indices);
+        }
+      }
+
+      visual.outline.matrix.copy(poseMat);
+      visual.outline.matrixAutoUpdate = false;
+      visual.outline.updateMatrixWorld(true);
+      visual.fill.matrix.copy(poseMat);
+      visual.fill.matrixAutoUpdate = false;
+      visual.fill.updateMatrixWorld(true);
+
+      visual.outline.visible = showPlaneRef.current;
+      visual.fill.visible = showPlaneRef.current;
+      (visual.outline.material as THREE.LineBasicMaterial).opacity = visOpacity;
+      (visual.fill.material as THREE.MeshBasicMaterial).opacity = visOpacity * 0.18;
+    });
+
+    // Drop vanished planes
+    trackedPlanesRef.current.forEach((_, key) => {
+      if (!still.has(key)) trackedPlanesRef.current.delete(key);
+    });
+    planeMeshesRef.current.forEach((vis, key) => {
+      if (!still.has(key)) {
+        scene.remove(vis.outline);
+        scene.remove(vis.fill);
+        vis.outline.geometry.dispose();
+        vis.fill.geometry.dispose();
+        (vis.outline.material as THREE.Material).dispose();
+        (vis.fill.material as THREE.Material).dispose();
+        planeMeshesRef.current.delete(key);
+      }
+    });
+
+    // Pick best horizontal plane
+    let best: TrackedPlane | null = null;
+    for (const [_, tp] of trackedPlanesRef.current) {
+      if (tp.orientation !== 'horizontal' && tp.orientation !== 'unknown') continue;
+      if (best === null || tp.area > best.area) best = tp;
+    }
+
+    if (best !== null) {
+      bestPlaneRef.current = best;
+      if (!originLockedRef.current) {
+        worldOriginRef.current = best.center.clone();
+        if (phaseRef.current === 'scanning') setPhase('plane-found');
+      }
+    } else if (!originLockedRef.current && !noPlaneFallbackRef.current) {
+      // No-plane fallback after 1.5s
+      if (performance.now() - scanStartedAtRef.current > 1500) {
+        const camPos = camPosRef.current;
+        const origin = new THREE.Vector3(
+          camPos.x,
+          camPos.y - 0.4,
+          camPos.z - 1.4,
+        );
+        worldOriginRef.current = origin;
+        noPlaneFallbackRef.current = true;
+        setPhase('plane-found');
+      }
+    }
+  };
+
+  // 13c. Native ARCore asteroid physics (no WebXR frame parameter)
+  const updateNativeAsteroids = (now: number, t: number) => {
+    const camPos = camPosRef.current;
+
+    // Escalating speed
+    const waveElapsed = now - waveStartTimeRef.current;
+    const tier = Math.min(SPEED_TIERS.length - 1, Math.floor(waveElapsed / 10_000));
+    if (tier !== speedTierRef.current) {
+      speedTierRef.current = tier;
+      setSpeedTierState(tier);
+    }
+    const { accelMult, speedMult, delayScale } = SPEED_TIERS[tier];
+
+    asteroidsRef.current.forEach((a, idx) => {
+      a.obj.rotation.x += a.angularVel.x;
+      a.obj.rotation.y += a.angularVel.y;
+      a.obj.rotation.z += a.angularVel.z;
+
+      if (a.state === 'drift') {
+        a.orbitAngle += 0.004;
+        const desired = new THREE.Vector3(
+          a.orbitCenter.x + Math.cos(a.orbitAngle) * a.orbitRadius,
+          a.spawnHeight + Math.sin(t * 0.9 + a.orbitAngle) * 0.03,
+          a.orbitCenter.z + Math.sin(a.orbitAngle) * a.orbitRadius,
+        );
+        a.obj.position.lerp(desired, 0.08);
+        a.velocity.multiplyScalar(0.9);
+
+        if ((frameCountRef.current + idx * 7) % 25 === 0) {
+          spawnDust(a.obj.position, 2);
+        }
+
+        if (now > a.nextAttackTime) {
+          a.state = 'charging';
+          a.stateTimer = now;
+          a.baseMat.emissive.setHex(0xff2200);
+          a.baseMat.emissiveIntensity = 1.0;
+          a.angularVel.multiplyScalar(2.4);
+        }
+      } else if (a.state === 'charging') {
+        const k = (now - a.stateTimer) / CHARGE_TELEGRAPH_MS;
+        a.baseMat.emissiveIntensity = 0.7 + Math.sin(t * 32) * 0.4;
+        a.obj.position.x += (Math.random() - 0.5) * 0.004;
+        a.obj.position.y += (Math.random() - 0.5) * 0.004;
+        a.obj.position.z += (Math.random() - 0.5) * 0.004;
+
+        if ((frameCountRef.current % 5) === 0) {
+          const toward = camPos.clone().sub(a.obj.position);
+          spawnFlame(a.obj.position, toward, 3);
+        }
+
+        if (k >= 1) {
+          const dir = camPos.clone().sub(a.obj.position).normalize();
+          a.velocity.copy(dir).multiplyScalar(0.01 * (1 + tier * 0.15));
+          a.state = 'attacking';
+        }
+      } else if (a.state === 'attacking') {
+        const toPlayer = camPos.clone().sub(a.obj.position);
+        const dist = toPlayer.length();
+        toPlayer.normalize();
+        a.velocity.addScaledVector(toPlayer, ATTACK_ACCEL * accelMult);
+
+        if (a.behaviour === 'curve') {
+          const perp = new THREE.Vector3(-toPlayer.z, 0, toPlayer.x);
+          a.velocity.addScaledVector(perp, Math.sin(t * 5) * CURVE_FORCE);
+        } else if (a.behaviour === 'orbit-strike') {
+          const perp = new THREE.Vector3(-toPlayer.z, 0, toPlayer.x);
+          a.velocity.addScaledVector(perp, CURVE_FORCE * 0.6);
+        }
+
+        a.velocity.y -= GRAVITY;
+        a.velocity.multiplyScalar(DRAG);
+
+        if (a.velocity.length() > MAX_SPEED * speedMult) a.velocity.setLength(MAX_SPEED * speedMult);
+
+        a.obj.position.add(a.velocity);
+
+        a.baseMat.emissiveIntensity = 0.6 + Math.sin(t * 22) * 0.4;
+
+        if ((frameCountRef.current % 3) === 0) {
+          spawnFlame(a.obj.position, a.velocity, 6);
+        }
+
+        if (dist < ATTACK_HIT_DIST && !dodgeActiveRef.current) {
+          damagePlayer();
+          killAsteroid(a, false);
+        }
+
+        const fromOrigin = worldOriginRef.current
+          ? a.obj.position.distanceTo(worldOriginRef.current) : 0;
+        if (fromOrigin > 3.5) {
+          a.state = 'drift';
+          a.baseMat.emissive.setHex(0x000000);
+          a.baseMat.emissiveIntensity = 0;
+          a.velocity.set(0, 0, 0);
+          a.angularVel.multiplyScalar(1 / 2.4);
+
+          const resetPt = samplePointOnPlane();
+          if (resetPt) {
+            a.obj.position.set(resetPt.x, resetPt.y, resetPt.z);
+            a.orbitCenter.set(resetPt.x, resetPt.y, resetPt.z);
+            a.spawnHeight = resetPt.y;
+          } else {
+            a.spawnHeight = (worldOriginRef.current?.y ?? 0) + SPAWN_HEIGHT_BASE + Math.random() * SPAWN_HEIGHT_RANGE;
+          }
+          a.orbitAngle = Math.random() * Math.PI * 2;
+          a.orbitRadius = 0.04 + Math.random() * 0.06;
+          a.nextAttackTime = now + (MIN_ATTACK_DELAY_MS + Math.random() * (MAX_ATTACK_DELAY_MS - MIN_ATTACK_DELAY_MS)) * delayScale;
+        }
+      }
+    });
+  };
 
   // 14. Start AR session ------------------------------------------------------
   const startAR = async (overlayEl?: HTMLElement) => {
@@ -1155,11 +1457,10 @@ export function useARGame(): UseARGameResult {
       const dpr = Math.min(window.devicePixelRatio, 1.5);
       const renderer = new THREE.WebGLRenderer({
         canvas,
-        alpha:           true,
-        antialias:       dpr < 1.3,           // skip MSAA on dense displays
+        alpha:           true,           // Transparent for native AR camera feed
+        antialias:       dpr < 1.3,      // skip MSAA on dense displays
         powerPreference: 'high-performance',
       });
-      renderer.xr.enabled = true;
       renderer.setPixelRatio(dpr);
       renderer.setSize(window.innerWidth, window.innerHeight);
       renderer.outputColorSpace    = THREE.SRGBColorSpace;
@@ -1177,130 +1478,198 @@ export function useARGame(): UseARGameResult {
       const camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.01, 100);
       cameraRef.current = camera;
 
-      const xr = (navigator as any).xr;
-      // Tiered session creation: try richer configs first, fall back to bare AR.
-      // We log each attempt so the user can see exactly which one their device accepts.
-      const fullInit: Record<string, any> = {
-        requiredFeatures: [],
-        optionalFeatures: ['plane-detection', 'hit-test', 'local-floor', 'dom-overlay'],
-      };
-      if (overlayEl) fullInit.domOverlay = { root: overlayEl };
+      // ── Branch: Native ARCore (Android) vs WebXR (Web) ────────────────────────
+      if (useNativeAR) {
+        // Native ARCore path: camera feed is rendered by native GLSurfaceView,
+        // we just render 3D content on top using matrices from arFrame events.
+        isNativeARModeRef.current = true;
+        renderer.xr.enabled = false;  // No WebXR needed
 
-      const overlayInit: Record<string, any> = {
-        requiredFeatures: [],
-        optionalFeatures: ['dom-overlay'],
-      };
-      if (overlayEl) overlayInit.domOverlay = { root: overlayEl };
+        // Listen to arFrame events from ARPlugin
+        arFrameListenerRef.current = (data: ARFrameData) => {
+          latestARFrameRef.current = data;
 
-      const bareInit: Record<string, any> = {
-        requiredFeatures: [],
-        optionalFeatures: [],
-      };
+          // Apply ARCore matrices to Three.js camera
+          const proj = new THREE.Matrix4().fromArray(data.projectionMatrix);
+          const view = new THREE.Matrix4().fromArray(data.viewMatrix);
+          camera.projectionMatrix.copy(proj);
+          camera.matrixWorldInverse.copy(view);
+          camera.matrix.copy(camera.matrixWorldInverse).invert();
+          camera.matrixAutoUpdate = false;
 
-      let session: any = null;
-      const attempts: Array<{ label: string; init: any }> = [
-        { label: 'full',    init: fullInit    },
-        { label: 'overlay', init: overlayInit },
-        { label: 'bare',    init: bareInit    },
-      ];
-      const errors: string[] = [];
-      for (const a of attempts) {
-        try {
-          // eslint-disable-next-line no-console
-          console.log('[AR] Trying immersive-ar session:', a.label, a.init);
-          session = await xr.requestSession('immersive-ar', a.init);
-          // eslint-disable-next-line no-console
-          console.log('[AR] Session created with config:', a.label);
-          break;
-        } catch (err: any) {
-          const msg = `${a.label}: ${err?.name ?? 'Error'} — ${err?.message ?? err}`;
-          errors.push(msg);
-          // eslint-disable-next-line no-console
-          console.warn('[AR] Session attempt failed —', msg);
-        }
-      }
-      if (!session) {
-        throw new Error(`AR unavailable. Tried ${attempts.length} configs:\n${errors.join('\n')}`);
-      }
-      sessionRef.current = session;
-      await renderer.xr.setSession(session);
+          // Update camera position for asteroid AI
+          camPosRef.current.set(data.cameraPosition[0], data.cameraPosition[1], data.cameraPosition[2]);
 
-      let refSpace: any;
-      try   { refSpace = await session.requestReferenceSpace('local-floor'); }
-      catch { refSpace = await session.requestReferenceSpace('local'); }
-      refSpaceRef.current = refSpace;
+          // Track planes from ARCore
+          updateNativePlaneTracking(data);
+        };
+        await ARPlugin.addListener('arFrame', arFrameListenerRef.current);
 
-      setPhase('scanning');
-      scanStartedAtRef.current = performance.now();
-      noPlaneFallbackRef.current = false;
+        setPhase('scanning');
+        scanStartedAtRef.current = performance.now();
+        noPlaneFallbackRef.current = false;
 
-      // ── Master animation loop ──────────────────────────────────────────────
-      renderer.setAnimationLoop((_time: number, frame: any) => {
-        if (!frame) return;
-        frameCountRef.current++;
+        // ── Native animation loop (requestAnimationFrame, not WebXR) ───────────
+        let lastTime = performance.now();
+        const nativeLoop = () => {
+          if (phaseRef.current === 'idle' || phaseRef.current === 'unsupported') return;
 
-        // 1. Plane tracking — throttled to ~30 Hz (every 2nd frame for faster detection)
-        if ((frameCountRef.current & 1) === 0) {
-          updatePlaneTracking(frame, refSpace);
-        }
+          const now = performance.now();
+          const t = now * 0.001;
+          const dt = now - lastTime;
+          lastTime = now;
+          frameCountRef.current++;
 
-        // 1b. No-plane fallback — if we've been scanning for 1.5s with no plane,
-        // synthesize an origin 1.5m in front of the camera so the game can start.
-        if (
-          phaseRef.current === 'scanning' &&
-          !originLockedRef.current &&
-          !noPlaneFallbackRef.current &&
-          performance.now() - scanStartedAtRef.current > 1500
-        ) {
-          const vp = frame.getViewerPose(refSpace);
-          if (vp) {
-            const p = vp.transform.position;
-            const o = vp.transform.orientation;
-            // Forward vector from quaternion (negative-Z)
-            const q = new THREE.Quaternion(o.x, o.y, o.z, o.w);
-            const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(q);
-            const origin = new THREE.Vector3(
-              p.x + fwd.x * 1.4,
-              p.y - 0.4,                 // ~hip-height below camera
-              p.z + fwd.z * 1.4,
-            );
-            worldOriginRef.current   = origin;
-            noPlaneFallbackRef.current = true;
-            setPhase('plane-found');
+          // Game physics + AI
+          if (phaseRef.current === 'playing' && !pausedRef.current) {
+            updateNativeAsteroids(now, t);
+            updateLetterDrops();
+            updateParticles(scene);
+          }
+
+          // Render (camera matrices updated by arFrame event)
+          renderer.render(scene, camera);
+          requestAnimationFrame(nativeLoop);
+        };
+        requestAnimationFrame(nativeLoop);
+
+        // Cleanup on stop
+        const stopNativeLoop = () => {
+          if (arFrameListenerRef.current) {
+            ARPlugin.removeListener('arFrame', arFrameListenerRef.current).catch(console.error);
+            arFrameListenerRef.current = null;
+          }
+        };
+        // Store cleanup function for stopAR
+        (stopAR as any)._nativeCleanup = stopNativeLoop;
+
+      } else {
+        // WebXR path: use existing WebXR implementation
+        renderer.xr.enabled = true;
+        isNativeARModeRef.current = false;
+
+        const xr = (navigator as any).xr;
+        // Tiered session creation
+        const fullInit: Record<string, any> = {
+          requiredFeatures: [],
+          optionalFeatures: ['plane-detection', 'hit-test', 'local-floor', 'dom-overlay'],
+        };
+        if (overlayEl) fullInit.domOverlay = { root: overlayEl };
+
+        const overlayInit: Record<string, any> = {
+          requiredFeatures: [],
+          optionalFeatures: ['dom-overlay'],
+        };
+        if (overlayEl) overlayInit.domOverlay = { root: overlayEl };
+
+        const bareInit: Record<string, any> = {
+          requiredFeatures: [],
+          optionalFeatures: [],
+        };
+
+        let session: any = null;
+        const attempts: Array<{ label: string; init: any }> = [
+          { label: 'full',    init: fullInit    },
+          { label: 'overlay', init: overlayInit },
+          { label: 'bare',    init: bareInit    },
+        ];
+        const errors: string[] = [];
+        for (const a of attempts) {
+          try {
+            // eslint-disable-next-line no-console
+            console.log('[AR] Trying immersive-ar session:', a.label, a.init);
+            session = await xr.requestSession('immersive-ar', a.init);
+            // eslint-disable-next-line no-console
+            console.log('[AR] Session created with config:', a.label);
+            break;
+          } catch (err: any) {
+            const msg = `${a.label}: ${err?.name ?? 'Error'} — ${err?.message ?? err}`;
+            errors.push(msg);
+            // eslint-disable-next-line no-console
+            console.warn('[AR] Session attempt failed —', msg);
           }
         }
-
-        // 2. Game physics + AI — paused freezes logic but keeps rendering
-        if (phaseRef.current === 'playing' && !pausedRef.current) {
-          const now = performance.now();
-          const t   = now * 0.001;
-          updateAsteroids(frame, refSpace, now, t);
-          updateLetterDrops();
-          updateParticles(scene);
+        if (!session) {
+          throw new Error(`AR unavailable. Tried ${attempts.length} configs:\n${errors.join('\n')}`);
         }
+        sessionRef.current = session;
+        await renderer.xr.setSession(session);
 
-        renderer.render(scene, camera);
-      });
+        let refSpace: any;
+        try   { refSpace = await session.requestReferenceSpace('local-floor'); }
+        catch { refSpace = await session.requestReferenceSpace('local'); }
+        refSpaceRef.current = refSpace;
 
-      session.addEventListener('end', () => {
-        renderer.setAnimationLoop(null);
-        canvas.remove();
-        canvasRef.current    = null;
-        sessionRef.current   = null;
-        asteroidPoolRef.current.forEach(a => scene.remove(a.obj));
-        asteroidPoolRef.current = [];
-        asteroidsRef.current = [];
-        particlesRef.current = [];
-        trackedPlanesRef.current.clear();
-        clearPlaneMeshes();
-        bestPlaneRef.current    = null;
-        worldOriginRef.current  = null;
-        originLockedRef.current = false;
-        setPhase('idle');
-        setSmashed(0); smashedRef.current = 0;
-        setHp(MAX_HP); hpRef.current = MAX_HP;
-        setWave(1);
-      });
+        setPhase('scanning');
+        scanStartedAtRef.current = performance.now();
+        noPlaneFallbackRef.current = false;
+
+        // ── WebXR animation loop ──────────────────────────────────────────────
+        renderer.setAnimationLoop((_time: number, frame: any) => {
+          if (!frame) return;
+          frameCountRef.current++;
+
+          // 1. Plane tracking
+          if ((frameCountRef.current & 1) === 0) {
+            updatePlaneTracking(frame, refSpace);
+          }
+
+          // 1b. No-plane fallback
+          if (
+            phaseRef.current === 'scanning' &&
+            !originLockedRef.current &&
+            !noPlaneFallbackRef.current &&
+            performance.now() - scanStartedAtRef.current > 1500
+          ) {
+            const vp = frame.getViewerPose(refSpace);
+            if (vp) {
+              const p = vp.transform.position;
+              const o = vp.transform.orientation;
+              const q = new THREE.Quaternion(o.x, o.y, o.z, o.w);
+              const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(q);
+              const origin = new THREE.Vector3(
+                p.x + fwd.x * 1.4,
+                p.y - 0.4,
+                p.z + fwd.z * 1.4,
+              );
+              worldOriginRef.current   = origin;
+              noPlaneFallbackRef.current = true;
+              setPhase('plane-found');
+            }
+          }
+
+          // 2. Game physics + AI
+          if (phaseRef.current === 'playing' && !pausedRef.current) {
+            const now = performance.now();
+            const t   = now * 0.001;
+            updateAsteroids(frame, refSpace, now, t);
+            updateLetterDrops();
+            updateParticles(scene);
+          }
+
+          renderer.render(scene, camera);
+        });
+
+        session.addEventListener('end', () => {
+          renderer.setAnimationLoop(null);
+          canvas.remove();
+          canvasRef.current    = null;
+          sessionRef.current   = null;
+          asteroidPoolRef.current.forEach(a => scene.remove(a.obj));
+          asteroidPoolRef.current = [];
+          asteroidsRef.current = [];
+          particlesRef.current = [];
+          trackedPlanesRef.current.clear();
+          clearPlaneMeshes();
+          bestPlaneRef.current    = null;
+          worldOriginRef.current  = null;
+          originLockedRef.current = false;
+          setPhase('idle');
+          setSmashed(0); smashedRef.current = 0;
+          setHp(MAX_HP); hpRef.current = MAX_HP;
+          setWave(1);
+        });
+      }
 
     } catch (err: any) {
       stopAR();

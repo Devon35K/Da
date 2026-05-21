@@ -1,6 +1,6 @@
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import { Capacitor } from '@capacitor/core';
-import ARPlugin from '../../plugins/ar-plugin';
+import ARPlugin, { ARFrameData, ARPlane } from '../../plugins/ar-plugin';
 
 export type ARStatus =
   | 'idle'
@@ -15,6 +15,8 @@ export interface DetectedPlane {
   centerX: number;
   centerY: number;
   centerZ: number;
+  poseMatrix: number[];           // 4x4 transform from plane-local to world
+  polygonXZ: number[];            // [x0, z0, x1, z1, ...] in plane-local space
 }
 
 export interface UseARPlaneDetectionResult {
@@ -22,6 +24,7 @@ export interface UseARPlaneDetectionResult {
   planes: DetectedPlane[];
   errorMsg: string;
   isSupported: boolean;
+  latestFrame: ARFrameData | null; // Exposed for useARGame to consume matrices
   startAR: (overlayEl?: HTMLElement) => Promise<void>;
   stopAR: () => void;
 }
@@ -31,7 +34,9 @@ export function useARPlaneDetection(): UseARPlaneDetectionResult {
   const [planes, setPlanes] = useState<DetectedPlane[]>([]);
   const [errorMsg, setErrorMsg] = useState('');
   const [isSupported, setIsSupported] = useState(false);
-  const [pollInterval, setPollInterval] = useState<NodeJS.Timeout | null>(null);
+  const [latestFrame, setLatestFrame] = useState<ARFrameData | null>(null);
+
+  const frameListenerRef = useRef<((data: ARFrameData) => void) | null>(null);
 
   const isNative = Capacitor.isNativePlatform();
   const isAndroid = Capacitor.getPlatform() === 'android';
@@ -54,65 +59,72 @@ export function useARPlaneDetection(): UseARPlaneDetectionResult {
 
   // ── Stop session helper ───────────────────────────────────────────────
   const stopAR = useCallback(() => {
-    if (pollInterval) {
-      clearInterval(pollInterval);
-      setPollInterval(null);
+    if (frameListenerRef.current) {
+      ARPlugin.removeListener('arFrame', frameListenerRef.current).catch(console.error);
+      frameListenerRef.current = null;
     }
-    
+
     if (isNative && isAndroid) {
       ARPlugin.stopARSession().catch(console.error);
     }
-    
+
     setStatus('idle');
     setPlanes([]);
     setErrorMsg('');
-  }, [pollInterval, isNative, isAndroid]);
-
-  // ── Poll for planes on Android ──────────────────────────────────────────
-  const startPlanePolling = useCallback(() => {
-    const interval = setInterval(async () => {
-      try {
-        const result = await ARPlugin.getDetectedPlanes();
-        if (result.planes && result.planes.length > 0) {
-          const detectedPlanes: DetectedPlane[] = result.planes.map((p: any) => ({
-            id: String(p.id),
-            orientation: p.orientation || 'unknown',
-            centerX: p.centerX || 0,
-            centerY: p.centerY || 0,
-            centerZ: p.centerZ || 0,
-          }));
-          setPlanes(detectedPlanes);
-          setStatus('plane-found');
-        } else {
-          setPlanes([]);
-          setStatus('active');
-        }
-      } catch (err) {
-        console.error('Error polling planes:', err);
-      }
-    }, 500); // Poll every 500ms
-    setPollInterval(interval);
-  }, []);
+    setLatestFrame(null);
+  }, [isNative, isAndroid]);
 
   // ── Start AR session ────────────────────────────────────────────────────
   const startAR = useCallback(async (overlayEl?: HTMLElement) => {
     setStatus('starting');
     setErrorMsg('');
     setPlanes([]);
+    setLatestFrame(null);
 
     if (isNative && isAndroid) {
       try {
         // Request camera permission first
-        await ARPlugin.requestCameraPermission();
-        
-        // Start AR session
+        const permResult = await ARPlugin.requestCameraPermission();
+        if (!permResult.granted) {
+          throw new Error('Camera permission denied');
+        }
+
+        // Start AR session (this creates the GLSurfaceView and starts rendering)
         const sessionResult = await ARPlugin.startARSession();
         if (!sessionResult.started) {
           throw new Error(sessionResult.error || 'Failed to start AR session');
         }
-        
+
         setStatus('active');
-        startPlanePolling();
+
+        // Listen to arFrame events
+        frameListenerRef.current = (data: ARFrameData) => {
+          setLatestFrame(data);
+
+          // Convert ARPlane[] to DetectedPlane[]
+          if (data.planes && data.planes.length > 0) {
+            const detectedPlanes: DetectedPlane[] = data.planes.map((p: ARPlane) => ({
+              id: String(p.id),
+              orientation: p.orientation.toLowerCase().includes('horizontal')
+                ? 'horizontal'
+                : p.orientation.toLowerCase().includes('vertical')
+                ? 'vertical'
+                : 'unknown',
+              centerX: p.centerX,
+              centerY: p.centerY,
+              centerZ: p.centerZ,
+              poseMatrix: p.poseMatrix,
+              polygonXZ: p.polygonXZ,
+            }));
+            setPlanes(detectedPlanes);
+            setStatus('plane-found');
+          } else {
+            setPlanes([]);
+            setStatus('active');
+          }
+        };
+
+        await ARPlugin.addListener('arFrame', frameListenerRef.current);
       } catch (err: any) {
         setErrorMsg(err.message || 'Failed to start AR');
         setStatus('error');
@@ -121,7 +133,7 @@ export function useARPlaneDetection(): UseARPlaneDetectionResult {
       // Web: Use virtual plane fallback (WebXR handled in useARGame)
       setStatus('active');
       setErrorMsg('Virtual plane mode active');
-      
+
       setTimeout(() => {
         setPlanes([
           {
@@ -130,18 +142,21 @@ export function useARPlaneDetection(): UseARPlaneDetectionResult {
             centerX: 0,
             centerY: 0,
             centerZ: -1.5,
+            poseMatrix: [1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,-1.5,1],
+            polygonXZ: [-1, -1, 1, -1, 1, 1, -1, 1],
           }
         ]);
         setStatus('plane-found');
       }, 500);
     }
-  }, [isNative, isAndroid, startPlanePolling]);
+  }, [isNative, isAndroid]);
 
   return {
     status,
     planes,
     errorMsg,
     isSupported,
+    latestFrame,
     startAR,
     stopAR,
   };

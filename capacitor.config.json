@@ -2,5 +2,8 @@
   "appId": "com.figma.wordlesmasher",
   "appName": "AR Wordle Smasher",
   "webDir": "dist",
-  "icon": "src/imports/iconaws.png"
+  "icon": "src/imports/iconaws.png",
+  "android": {
+    "backgroundColor": "#00000000"
+  }
 }
