@@ -1,8 +1,8 @@
-import { useRef, useState, useCallback, useEffect } from 'react';
+import { useState, useCallback, useEffect } from 'react';
+import { Capacitor } from '@capacitor/core';
+import ARPlugin from '../../plugins/ar-plugin';
 
 export type ARStatus =
-  | 'checking-support'
-  | 'unsupported'
   | 'idle'
   | 'starting'
   | 'active'
@@ -12,7 +12,9 @@ export type ARStatus =
 export interface DetectedPlane {
   id: string;
   orientation: 'horizontal' | 'vertical' | 'unknown';
-  vertexCount: number;
+  centerX: number;
+  centerY: number;
+  centerZ: number;
 }
 
 export interface UseARPlaneDetectionResult {
@@ -25,132 +27,121 @@ export interface UseARPlaneDetectionResult {
 }
 
 export function useARPlaneDetection(): UseARPlaneDetectionResult {
-  const [status, setStatus] = useState<ARStatus>('checking-support');
+  const [status, setStatus] = useState<ARStatus>('idle');
   const [planes, setPlanes] = useState<DetectedPlane[]>([]);
   const [errorMsg, setErrorMsg] = useState('');
+  const [isSupported, setIsSupported] = useState(false);
+  const [pollInterval, setPollInterval] = useState<NodeJS.Timeout | null>(null);
 
-  const sessionRef = useRef<any>(null);
-  const glRef = useRef<WebGLRenderingContext | null>(null);
-  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const isNative = Capacitor.isNativePlatform();
+  const isAndroid = Capacitor.getPlatform() === 'android';
 
-  // ── 1. Check WebXR AR support on mount ──────────────────────────────────
+  // ── Check AR support on native ───────────────────────────────────────────
   useEffect(() => {
-    const xr = (navigator as any).xr;
-    if (!xr) {
-      setStatus('unsupported');
-      return;
+    if (isNative && isAndroid) {
+      ARPlugin.checkARSupport().then(result => {
+        setIsSupported(result.supported);
+        if (!result.supported) {
+          setErrorMsg('ARCore not supported or not installed');
+        }
+      }).catch(err => {
+        setErrorMsg(err.message || 'Failed to check AR support');
+      });
+    } else {
+      setIsSupported(true); // WebXR support checked elsewhere
     }
-    xr.isSessionSupported('immersive-ar')
-      .then((ok: boolean) => setStatus(ok ? 'idle' : 'unsupported'))
-      .catch(() => setStatus('unsupported'));
-  }, []);
+  }, [isNative, isAndroid]);
 
-  // ── 2. Stop session helper ───────────────────────────────────────────────
+  // ── Stop session helper ───────────────────────────────────────────────
   const stopAR = useCallback(() => {
-    if (sessionRef.current) {
-      sessionRef.current.end().catch(() => {});
-      sessionRef.current = null;
+    if (pollInterval) {
+      clearInterval(pollInterval);
+      setPollInterval(null);
     }
-    canvasRef.current?.remove();
-    canvasRef.current = null;
-    glRef.current = null;
+    
+    if (isNative && isAndroid) {
+      ARPlugin.stopARSession().catch(console.error);
+    }
+    
+    setStatus('idle');
+    setPlanes([]);
+    setErrorMsg('');
+  }, [pollInterval, isNative, isAndroid]);
+
+  // ── Poll for planes on Android ──────────────────────────────────────────
+  const startPlanePolling = useCallback(() => {
+    const interval = setInterval(async () => {
+      try {
+        const result = await ARPlugin.getDetectedPlanes();
+        if (result.planes && result.planes.length > 0) {
+          const detectedPlanes: DetectedPlane[] = result.planes.map((p: any) => ({
+            id: String(p.id),
+            orientation: p.orientation || 'unknown',
+            centerX: p.centerX || 0,
+            centerY: p.centerY || 0,
+            centerZ: p.centerZ || 0,
+          }));
+          setPlanes(detectedPlanes);
+          setStatus('plane-found');
+        } else {
+          setPlanes([]);
+          setStatus('active');
+        }
+      } catch (err) {
+        console.error('Error polling planes:', err);
+      }
+    }, 500); // Poll every 500ms
+    setPollInterval(interval);
   }, []);
 
-  // ── 3. Start AR session with plane-detection ─────────────────────────────
+  // ── Start AR session ────────────────────────────────────────────────────
   const startAR = useCallback(async (overlayEl?: HTMLElement) => {
-    const xr = (navigator as any).xr;
-    if (!xr) { setStatus('unsupported'); return; }
-
     setStatus('starting');
     setErrorMsg('');
     setPlanes([]);
 
-    try {
-      // Build session init — dom-overlay is optional so the page HTML can
-      // appear on top of the camera feed.
-      const sessionInit: Record<string, any> = {
-        requiredFeatures: ['plane-detection'],
-        optionalFeatures: ['hit-test', 'local-floor', 'dom-overlay'],
-      };
-      if (overlayEl) sessionInit.domOverlay = { root: overlayEl };
-
-      const session: any = await xr.requestSession('immersive-ar', sessionInit);
-      sessionRef.current = session;
-
-      // ── WebGL context bound to the XR session ──
-      const canvas = document.createElement('canvas');
-      canvasRef.current = canvas;
-      const gl = canvas.getContext('webgl', { xrCompatible: true }) as any;
-      glRef.current = gl;
-      await gl.makeXRCompatible();
-
-      const baseLayer = new (window as any).XRWebGLLayer(session, gl);
-      await session.updateRenderState({ baseLayer });
-
-      // ── Reference space ──
-      let refSpace: any = null;
+    if (isNative && isAndroid) {
       try {
-        refSpace = await session.requestReferenceSpace('local-floor');
-      } catch {
-        refSpace = await session.requestReferenceSpace('local');
-      }
-
-      setStatus('active');
-
-      // ── Per-frame render + plane detection loop ──
-      const onFrame = (_time: number, frame: any) => {
-        if (!sessionRef.current) return;
-
-        // Clear the WebGL framebuffer so camera passthrough is visible
-        const fb = session.renderState.baseLayer?.framebuffer ?? null;
-        gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
-        gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
-
-        // Read detected planes from the XRFrame
-        const rawPlanes: Set<any> = frame.detectedPlanes ?? new Set();
-
-        if (rawPlanes.size > 0) {
-          const mapped: DetectedPlane[] = [];
-          rawPlanes.forEach((p: any) => {
-            mapped.push({
-              id: String(p),
-              orientation: p.orientation ?? 'unknown',
-              vertexCount: p.polygon?.length ?? 0,
-            });
-          });
-          setPlanes(mapped);
-          setStatus('plane-found');
+        // Request camera permission first
+        await ARPlugin.requestCameraPermission();
+        
+        // Start AR session
+        const sessionResult = await ARPlugin.startARSession();
+        if (!sessionResult.started) {
+          throw new Error(sessionResult.error || 'Failed to start AR session');
         }
-
-        sessionRef.current.requestAnimationFrame(onFrame);
-      };
-
-      session.requestAnimationFrame(onFrame);
-
-      // Clean up when the session ends (user pressed browser back, etc.)
-      session.addEventListener('end', () => {
-        sessionRef.current = null;
-        canvasRef.current?.remove();
-        canvasRef.current = null;
-        setStatus('idle');
-        setPlanes([]);
-      });
-
-    } catch (err: any) {
-      stopAR();
-      setStatus('error');
-      setErrorMsg(err?.message ?? 'Failed to start AR session');
+        
+        setStatus('active');
+        startPlanePolling();
+      } catch (err: any) {
+        setErrorMsg(err.message || 'Failed to start AR');
+        setStatus('error');
+      }
+    } else {
+      // Web: Use virtual plane fallback (WebXR handled in useARGame)
+      setStatus('active');
+      setErrorMsg('Virtual plane mode active');
+      
+      setTimeout(() => {
+        setPlanes([
+          {
+            id: 'virtual-plane-1',
+            orientation: 'horizontal',
+            centerX: 0,
+            centerY: 0,
+            centerZ: -1.5,
+          }
+        ]);
+        setStatus('plane-found');
+      }, 500);
     }
-  }, [stopAR]);
-
-  // Cleanup on unmount
-  useEffect(() => () => stopAR(), [stopAR]);
+  }, [isNative, isAndroid, startPlanePolling]);
 
   return {
     status,
     planes,
     errorMsg,
-    isSupported: status !== 'unsupported' && status !== 'checking-support',
+    isSupported,
     startAR,
     stopAR,
   };

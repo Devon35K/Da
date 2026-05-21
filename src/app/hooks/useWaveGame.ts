@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { pickRandomWord, scoreGuess, type LetterColor } from '../data/wardenCodex';
+import { pickRandomWord, scoreGuess, FINAL_SEAL, type LetterColor } from '../data/wardenCodex';
 
 // ── Tunables ────────────────────────────────────────────────────────────────
-export const WAVE_DURATION_MS    = 60_000;   // 1 minute per wave
+export const WAVE_DURATION_MS    = 60_000;   // 60 seconds per wave
 export const MAX_GUESSES         = 6;        // Wordle attempts per puzzle
 export const BOSS_ATTACK_INTERVAL_MS = 8_000;  // boss hits player every 8s
 export const BOSS_ATTACK_DAMAGE  = 18;       // damage per boss attack
@@ -56,7 +56,7 @@ export interface UseWaveGameResult {
   // Stats
   wordsSolved:      number;
   // Actions
-  startGame:        () => void;
+  startGame:        (fromWave?: number) => void;
   addLetter:        (letter: string) => void;
   backspace:        () => void;
   submitGuess:      () => SubmitGuessResult;
@@ -153,9 +153,10 @@ export function useWaveGame(opts: UseWaveGameOptions): UseWaveGameResult {
   }, [enabled, metaPhase, onBossAttack]);
 
   // ── Actions ──────────────────────────────────────────────────────────────
-  const startGame = useCallback(() => {
-    setWave(1);
-    waveRef.current = 1;
+  const startGame = useCallback((fromWave = 1) => {
+    const w = Math.max(1, Math.floor(fromWave));
+    setWave(w);
+    waveRef.current = w;
     setTargetWord(pickRandomWord());
     setGuess('');
     setAttempts([]);
@@ -164,7 +165,7 @@ export function useWaveGame(opts: UseWaveGameOptions): UseWaveGameResult {
     setBossWordsTotal(0);
     setTimeRemainingMs(WAVE_DURATION_MS);
     setMetaPhase('wave-active');
-    onWaveStart?.(1);
+    onWaveStart?.(w);
   }, [onWaveStart]);
 
   const reset = useCallback(() => {
@@ -191,6 +192,13 @@ export function useWaveGame(opts: UseWaveGameOptions): UseWaveGameResult {
 
   const advanceToNextWave = useCallback(() => {
     const next = waveRef.current + 1;
+    if (next > BOSS_WAVE_INTERVAL) {
+      // All waves cleared — victory!
+      setBossWordsLeft(0);
+      setBossWordsTotal(0);
+      setMetaPhase('victory');
+      return;
+    }
     setWave(next);
     waveRef.current = next;
     setGuess('');
@@ -230,7 +238,8 @@ export function useWaveGame(opts: UseWaveGameOptions): UseWaveGameResult {
           return { ok: true, result: 'win', event: 'boss-defeated', solvedWord, attemptsUsed };
         } else {
           // More words required to finish boss
-          setTargetWord(pickRandomWord(targetWord));
+          // Last remaining seal is always FINAL_SEAL (the Final Seal)
+          setTargetWord(left === 1 ? FINAL_SEAL : pickRandomWord(targetWord));
           setAttempts([]);
           return { ok: true, result: 'continue', event: 'seal-broken', solvedWord, attemptsUsed };
         }

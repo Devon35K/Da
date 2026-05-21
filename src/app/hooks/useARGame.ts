@@ -1,10 +1,12 @@
 import { useRef, useState, useCallback, useEffect } from 'react';
 import * as THREE from 'three';
+import { Capacitor } from '@capacitor/core';
 import {
   pickRandomWord, pickDropLetter, scoreGuess,
   type LetterColor,
 } from '../data/wardenCodex';
 import { safeVibrate } from './useSettings';
+import { sfxDestroy, sfxDash, sfxDamage } from '../utils/sfx';
 // GLB assets — Vite resolves these to URL strings at build time
 import asteroidUrl          from '../../3dmodel/asteroid.glb?url';
 import asteroid01Url        from '../../3dmodel/asteroid_01.glb?url';
@@ -97,8 +99,15 @@ export interface UseARGameResult {
   consumeLetters:   (letters: string[]) => void;
   /** Despawn every currently-active asteroid (used when a wave ends). */
   clearActiveAsteroids: () => void;
-  /** Clear and spawn a fresh wave of asteroids from the pool. */
-  respawnWave:      (count?: number) => void;
+  /** Clear and spawn a fresh wave of asteroids from the pool.
+   *  Pass extraGraceMs to add extra no-attack delay at wave start. */
+  respawnWave:          (count?: number, extraGraceMs?: number) => void;
+  /** Reset the speed-escalation clock — call at the start of each wave-active phase. */
+  resetWaveSpeedTimer:  () => void;
+  /** Current speed tier (0–3); increments every 10 s of a wave. */
+  speedTier:            number;
+  /** Trigger a dodge: plays sfxDash, grants 400 ms invulnerability, vibrates. */
+  dodge:                () => void;
 }
 
 // ── Tunables ─────────────────────────────────────────────────────────────────
@@ -124,6 +133,14 @@ const DRAG                  = 0.985;            // air resistance
 const ATTACK_ACCEL          = 0.00075;          // acceleration toward player
 const MAX_SPEED             = 0.022;            // m/frame (~1.3 m/s @ 60fps)
 const CURVE_FORCE           = 0.00055;
+
+// Speed escalation: tier increments every 10 s of a 40-second wave
+const SPEED_TIERS = [
+  { accelMult: 1.00, speedMult: 1.00, delayScale: 1.00 },   // 0–10 s  (base)
+  { accelMult: 1.45, speedMult: 1.30, delayScale: 0.72 },   // 10–20 s
+  { accelMult: 2.00, speedMult: 1.60, delayScale: 0.50 },   // 20–30 s
+  { accelMult: 2.70, speedMult: 2.00, delayScale: 0.32 },   // 30–40 s (frenzy)
+] as const;
 
 // (Old FBX + 1K texture pipeline removed — now using single low-poly GLB)
 
@@ -153,6 +170,11 @@ export function useARGame(): UseARGameResult {
   const pausedRef     = useRef(false);
   const showPlaneRef  = useRef(true);
   const frameCountRef = useRef(0);
+
+  // Speed-escalation refs / state
+  const waveStartTimeRef = useRef(0);
+  const speedTierRef     = useRef(0);
+  const [speedTier, setSpeedTierState] = useState(0);
 
   // Refs mirror state for the animation-loop closure
   const phaseRef   = useRef<GamePhase>('checking');
@@ -190,6 +212,8 @@ export function useARGame(): UseARGameResult {
   const scanStartedAtRef    = useRef<number>(0);
   /** True when we're operating without plane-detection (synthetic origin in front of camera). */
   const noPlaneFallbackRef  = useRef(false);
+  /** True during the brief invulnerability window after a dodge. */
+  const dodgeActiveRef      = useRef(false);
 
   // 1. Support check -----------------------------------------------------------
   useEffect(() => {
@@ -547,7 +571,7 @@ export function useARGame(): UseARGameResult {
   };
 
   // 5b. Recycle: reset a pool instance to a fresh state on the plane ---------
-  const resetAsteroid = (a: GameAsteroid, now: number): boolean => {
+  const resetAsteroid = (a: GameAsteroid, now: number, extraGraceMs = 0): boolean => {
     const planePt = samplePointOnPlane();
     const origin  = worldOriginRef.current;
     let height: number;
@@ -573,10 +597,13 @@ export function useARGame(): UseARGameResult {
 
     a.state      = 'drift';
     a.velocity.set(0, 0, 0);
+    const resetElapsed = performance.now() - waveStartTimeRef.current;
+    const resetTier = Math.min(SPEED_TIERS.length - 1, Math.floor(resetElapsed / 10_000));
+    const spinMult  = 1 + resetTier * 0.4;
     a.angularVel.set(
-      (Math.random()-0.5)*0.02,
-      (Math.random()-0.5)*0.024,
-      (Math.random()-0.5)*0.016,
+      (Math.random()-0.5)*0.02  * spinMult,
+      (Math.random()-0.5)*0.024 * spinMult,
+      (Math.random()-0.5)*0.016 * spinMult,
     );
 
     const roll = Math.random();
@@ -587,7 +614,7 @@ export function useARGame(): UseARGameResult {
     a.orbitRadius = 0.04 + Math.random() * 0.06;
     a.spawnHeight = height;
 
-    a.nextAttackTime = now + MIN_ATTACK_DELAY_MS + Math.random()*(MAX_ATTACK_DELAY_MS - MIN_ATTACK_DELAY_MS);
+    a.nextAttackTime = now + (MIN_ATTACK_DELAY_MS + Math.random()*(MAX_ATTACK_DELAY_MS - MIN_ATTACK_DELAY_MS)) * SPEED_TIERS[resetTier].delayScale + extraGraceMs;
     a.stateTimer    = 0;
     a.alive         = true;
 
@@ -597,10 +624,10 @@ export function useARGame(): UseARGameResult {
   };
 
   // 5c. Pull a free instance from the pool and activate it -------------------
-  const spawnFromPool = (now: number): boolean => {
+  const spawnFromPool = (now: number, extraGraceMs = 0): boolean => {
     const idle = asteroidPoolRef.current.find(a => !a.alive);
     if (!idle) return false;
-    if (!resetAsteroid(idle, now)) return false;
+    if (!resetAsteroid(idle, now, extraGraceMs)) return false;
     asteroidsRef.current.push(idle);
     return true;
   };
@@ -609,6 +636,7 @@ export function useARGame(): UseARGameResult {
   const killAsteroid = (a: GameAsteroid, byPlayer: boolean) => {
     if (!a.alive) return;
     a.alive = false;
+    if (byPlayer) sfxDestroy();
     spawnParticles(a.obj.position.clone(), byPlayer ? 0xf97316 : 0xff2200);
     a.obj.visible = false;        // hide instead of remove (kept in scene + pool)
     asteroidsRef.current = asteroidsRef.current.filter(x => x !== a);
@@ -636,6 +664,7 @@ export function useARGame(): UseARGameResult {
     hpRef.current = Math.max(0, hpRef.current - DAMAGE_PER_HIT);
     setHp(hpRef.current);
     setDamageTick(x => x + 1);
+    sfxDamage();
     safeVibrate(200);
     if (hpRef.current <= 0) setPhase('game-over');
   };
@@ -885,6 +914,15 @@ export function useARGame(): UseARGameResult {
     }
     const camPos = camPosRef.current;
 
+    // Escalating speed: tier 0-3 over the 40-second wave
+    const waveElapsed = now - waveStartTimeRef.current;
+    const tier = Math.min(SPEED_TIERS.length - 1, Math.floor(waveElapsed / 10_000));
+    if (tier !== speedTierRef.current) {
+      speedTierRef.current = tier;
+      setSpeedTierState(tier);
+    }
+    const { accelMult, speedMult, delayScale } = SPEED_TIERS[tier];
+
     asteroidsRef.current.forEach((a, idx) => {
       // Always tumble
       a.obj.rotation.x += a.angularVel.x;
@@ -933,9 +971,9 @@ export function useARGame(): UseARGameResult {
         }
 
         if (k >= 1) {
-          // Initial impulse toward player
+          // Initial impulse toward player (scales slightly with speed tier)
           const dir = camPos.clone().sub(a.obj.position).normalize();
-          a.velocity.copy(dir).multiplyScalar(0.01);
+          a.velocity.copy(dir).multiplyScalar(0.01 * (1 + tier * 0.15));
           a.state = 'attacking';
         }
       }
@@ -945,7 +983,7 @@ export function useARGame(): UseARGameResult {
         const toPlayer = camPos.clone().sub(a.obj.position);
         const dist = toPlayer.length();
         toPlayer.normalize();
-        a.velocity.addScaledVector(toPlayer, ATTACK_ACCEL);
+        a.velocity.addScaledVector(toPlayer, ATTACK_ACCEL * accelMult);
 
         // Behaviour-specific modifiers
         if (a.behaviour === 'curve') {
@@ -960,8 +998,8 @@ export function useARGame(): UseARGameResult {
         a.velocity.y -= GRAVITY;
         a.velocity.multiplyScalar(DRAG);
 
-        // Clamp speed
-        if (a.velocity.length() > MAX_SPEED) a.velocity.setLength(MAX_SPEED);
+        // Clamp speed (scales with tier)
+        if (a.velocity.length() > MAX_SPEED * speedMult) a.velocity.setLength(MAX_SPEED * speedMult);
 
         // Integrate position
         a.obj.position.add(a.velocity);
@@ -976,8 +1014,8 @@ export function useARGame(): UseARGameResult {
           spawnFlame(a.obj.position, a.velocity, 6);
         }
 
-        // Hit check → damage
-        if (dist < ATTACK_HIT_DIST) {
+        // Hit check → damage (skip if player is mid-dodge)
+        if (dist < ATTACK_HIT_DIST && !dodgeActiveRef.current) {
           damagePlayer();
           killAsteroid(a, false);
         }
@@ -1003,7 +1041,7 @@ export function useARGame(): UseARGameResult {
           }
           a.orbitAngle     = Math.random() * Math.PI * 2;
           a.orbitRadius    = 0.04 + Math.random() * 0.06;
-          a.nextAttackTime = now + MIN_ATTACK_DELAY_MS + Math.random() * (MAX_ATTACK_DELAY_MS - MIN_ATTACK_DELAY_MS);
+          a.nextAttackTime = now + (MIN_ATTACK_DELAY_MS + Math.random() * (MAX_ATTACK_DELAY_MS - MIN_ATTACK_DELAY_MS)) * delayScale;
         }
       }
     });
@@ -1201,18 +1239,18 @@ export function useARGame(): UseARGameResult {
         if (!frame) return;
         frameCountRef.current++;
 
-        // 1. Plane tracking — throttled to ~15 Hz (every 4th frame)
-        if ((frameCountRef.current & 3) === 0) {
+        // 1. Plane tracking — throttled to ~30 Hz (every 2nd frame for faster detection)
+        if ((frameCountRef.current & 1) === 0) {
           updatePlaneTracking(frame, refSpace);
         }
 
-        // 1b. No-plane fallback — if we've been scanning for 3.5s with no plane,
+        // 1b. No-plane fallback — if we've been scanning for 1.5s with no plane,
         // synthesize an origin 1.5m in front of the camera so the game can start.
         if (
           phaseRef.current === 'scanning' &&
           !originLockedRef.current &&
           !noPlaneFallbackRef.current &&
-          performance.now() - scanStartedAtRef.current > 3500
+          performance.now() - scanStartedAtRef.current > 1500
         ) {
           const vp = frame.getViewerPose(refSpace);
           if (vp) {
@@ -1293,6 +1331,13 @@ export function useARGame(): UseARGameResult {
   useEffect(() => () => stopAR(), [stopAR]);
 
   // ── External controls (used by the wave/Wordle meta-state hook) ────────────
+  /** Call at the start of every wave-active phase to reset the speed-escalation clock. */
+  const resetWaveSpeedTimer = useCallback(() => {
+    waveStartTimeRef.current = performance.now();
+    speedTierRef.current     = 0;
+    setSpeedTierState(0);
+  }, []);
+
   const setWaveTo = useCallback((n: number) => {
     setWave(Math.max(1, Math.floor(n)));
   }, []);
@@ -1302,6 +1347,7 @@ export function useARGame(): UseARGameResult {
     hpRef.current = Math.max(0, hpRef.current - amount);
     setHp(hpRef.current);
     setDamageTick(x => x + 1);
+    sfxDamage();
     safeVibrate(180);
     if (hpRef.current <= 0) setPhase('game-over');
   }, []);
@@ -1323,14 +1369,14 @@ export function useARGame(): UseARGameResult {
    * Spawn a fresh wave of asteroids from the pool. Clears any existing ones first
    * so this is safe to call any time. Used at the start of each wave.
    */
-  const respawnWave = useCallback((count: number = WAVE_INITIAL_COUNT) => {
+  const respawnWave = useCallback((count: number = WAVE_INITIAL_COUNT, extraGraceMs = 0) => {
     asteroidsRef.current.forEach(a => {
       a.alive = false;
       a.obj.visible = false;
     });
     asteroidsRef.current = [];
     const now = performance.now();
-    for (let i = 0; i < count; i++) spawnFromPool(now);
+    for (let i = 0; i < count; i++) spawnFromPool(now, extraGraceMs);
   }, []);
 
   const consumeLetters = useCallback((letters: string[]) => {
@@ -1342,6 +1388,14 @@ export function useARGame(): UseARGameResult {
     }
     collectedLettersRef.current = inv;
     setCollectedLetters(inv);
+  }, []);
+
+  const dodge = useCallback(() => {
+    if (dodgeActiveRef.current) return;
+    dodgeActiveRef.current = true;
+    sfxDash();
+    safeVibrate(45);
+    setTimeout(() => { dodgeActiveRef.current = false; }, 400);
   }, []);
 
   return {
@@ -1367,5 +1421,8 @@ export function useARGame(): UseARGameResult {
     consumeLetters,
     clearActiveAsteroids,
     respawnWave,
+    resetWaveSpeedTimer,
+    speedTier,
+    dodge,
   };
 }

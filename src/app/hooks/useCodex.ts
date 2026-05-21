@@ -2,12 +2,86 @@ import { useCallback, useState } from 'react';
 import { pickRandomWord } from '../data/wardenCodex';
 import { getSettings } from './useSettings';
 
-const _OFFLINE_HINTS = [
-  'Focus on letters you have not yet tried.',
-  'One of your letters sits in the wrong constellation.',
-  'Trust the colors. They never lie.',
-  'The seal is forged from elements both ancient and familiar.',
-];
+const _VITE_OAI_KEY   = (import.meta as any).env?.VITE_OPENAI_API_KEY  as string | undefined;
+const _VITE_OAI_MODEL = (import.meta as any).env?.VITE_OPENAI_MODEL    as string | undefined;
+
+/**
+ * Direct OpenAI call — used when the Django backend is unreachable but
+ * VITE_OPENAI_API_KEY is set in .env.local.
+ */
+async function fetchOpenAIHint(word: string, attempts: HintAttempt[]): Promise<string | null> {
+  if (!_VITE_OAI_KEY) return null;
+  const attemptsText = attempts.map(a =>
+    a.guess.split('').map((l, i) => `${l}(${a.colors[i][0].toUpperCase()})`).join(' ')
+  ).join('\n') || '(no attempts yet)';
+  const prompt =
+    `You are the Warden, a cosmic entity guarding the Rift Codex.\n` +
+    `The player is solving the secret 5-letter word: "${word}".\n` +
+    `Attempts so far (G=correct, Y=wrong-position, X=not-in-word):\n${attemptsText}\n` +
+    `Give ONE cryptic dramatic hint (max 20 words) WITHOUT spelling the word. Be poetic. No quotes.`;
+  try {
+    const res = await fetch('https://api.openai.com/v1/chat/completions', {
+      method:  'POST',
+      headers: {
+        'Content-Type':  'application/json',
+        'Authorization': `Bearer ${_VITE_OAI_KEY}`,
+      },
+      body: JSON.stringify({
+        model:      _VITE_OAI_MODEL ?? 'gpt-4o-mini',
+        messages:   [{ role: 'user', content: prompt }],
+        max_tokens: 60,
+        temperature: 0.85,
+      }),
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    return (data.choices?.[0]?.message?.content as string)?.trim() ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** Generate a real hint from attempt color feedback without spoiling the word. */
+function buildLocalHint(word: string, attempts: HintAttempt[]): string {
+  const W = word.toUpperCase();
+
+  if (attempts.length === 0) {
+    const v = W.split('').filter(l => 'AEIOU'.includes(l)).length;
+    return `The seal-word holds ${v} vowel${v !== 1 ? 's' : ''}. Start there, Warden.`;
+  }
+
+  const greens:  { letter: string; pos: number }[] = [];
+  const yellows: string[] = [];
+  const usedG = new Set<string>();
+  const usedY = new Set<string>();
+
+  for (const a of attempts) {
+    a.colors.forEach((c, i) => {
+      const L = a.guess[i]?.toUpperCase() ?? '';
+      if (c === 'green') {
+        const key = `${L}${i}`;
+        if (!usedG.has(key)) { usedG.add(key); greens.push({ letter: L, pos: i + 1 }); }
+      } else if (c === 'yellow') {
+        if (!usedY.has(L)) { usedY.add(L); yellows.push(L); }
+      }
+    });
+  }
+
+  if (greens.length > 0) {
+    const g = greens[greens.length - 1];
+    return `'${g.letter}' is locked at position ${g.pos}. Keep it — shift the rest.`;
+  }
+  if (yellows.length > 0) {
+    const y = yellows[Math.floor(Math.random() * yellows.length)];
+    return `'${y}' is in the word — move it to a different position.`;
+  }
+  if (attempts.length >= 3) {
+    return `The seal-word begins with '${W[0]}'. Build from there.`;
+  }
+  const v = W.split('').filter(l => 'AEIOU'.includes(l)).length;
+  return `${v} vowel${v !== 1 ? 's' : ''} are woven into the seal. Try centering them.`;
+}
 
 // See useDictionary.ts — relative default routes through Vite proxy.
 const API_BASE: string = (import.meta as any).env?.VITE_API_BASE ?? '';
@@ -53,7 +127,7 @@ export function useCodex() {
   ): Promise<string> => {
     // Settings gate — skip the network call entirely if user disabled AI hints
     if (!getSettings().aiHintsEnabled) {
-      const local = _OFFLINE_HINTS[Math.floor(Math.random() * _OFFLINE_HINTS.length)];
+      const local = buildLocalHint(word, attempts);
       setHint(local);
       return local;
     }
@@ -72,7 +146,9 @@ export function useCodex() {
       setHint(h);
       return h;
     } catch {
-      const fallback = 'The Codex is silent… trust your instincts, Warden.';
+      // Second tier: direct OpenAI if VITE_OPENAI_API_KEY is configured
+      const ai = await fetchOpenAIHint(word, attempts);
+      const fallback = ai ?? buildLocalHint(word, attempts);
       setHint(fallback);
       return fallback;
     } finally {

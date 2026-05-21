@@ -122,6 +122,8 @@ export default function WordlePuzzle({
         @keyframes wpSlideUp { from { transform: translateY(20px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
         @keyframes wpFlip    { 0% { transform: rotateX(0); } 50% { transform: rotateX(90deg); } 100% { transform: rotateX(0); } }
         @keyframes wpBossPulse { 0%, 100% { box-shadow: 0 0 8px #ec4899, 0 0 18px #ec4899aa; } 50% { box-shadow: 0 0 14px #ec4899, 0 0 30px #ec4899; } }
+        @keyframes hintDots    { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+        @keyframes hintNudge   { 0%, 100% { opacity: 0.7; transform: translateY(0); } 50% { opacity: 1; transform: translateY(-2px); } }
       `}</style>
 
       <div
@@ -230,12 +232,25 @@ export default function WordlePuzzle({
 
         {/* Hint */}
         {(hint || hintLoading) && (
-          <div className="mx-3 mb-2 px-3 py-2 border-2 border-[#60a5fa] bg-[#60a5fa]/10">
-            <p className="text-[6px] text-[#60a5fa] tracking-widest mb-1">⚡ WARDEN'S HINT</p>
+          <div className="mx-3 mb-2 px-3 py-2 border-2 border-[#60a5fa] bg-[#60a5fa]/10 relative">
+            <p className="text-[6px] text-[#60a5fa] tracking-widest mb-1">⚡ WARDEN'S CODEX</p>
             <p className="text-[7px] text-white/90 leading-[12px] italic">
-              {hintLoading ? 'Consulting the codex...' : hint}
+              {hintLoading
+                ? <span style={{ animation: 'hintDots 1.2s ease-in-out infinite' }}>Consulting the codex…</span>
+                : hint
+              }
             </p>
           </div>
+        )}
+
+        {/* Auto-nudge: suggest hint after 4 failed attempts */}
+        {onRequestHint && attempts.length >= 4 && !hint && !hintLoading && (
+          <p
+            className="text-center text-[6px] text-[#60a5fa]/70 tracking-widest pb-1"
+            style={{ animation: 'hintNudge 1.8s ease-in-out infinite' }}
+          >
+            ▲ ASK THE WARDEN FOR GUIDANCE
+          </p>
         )}
 
         {/* Inventory + hint button */}
@@ -246,10 +261,10 @@ export default function WordlePuzzle({
           {onRequestHint && (
             <button
               onClick={onRequestHint}
-              disabled={hintLoading || !!hint}
-              className="text-[6px] px-2 py-1 border-2 border-[#60a5fa] text-[#60a5fa] hover:bg-[#60a5fa] hover:text-[#0a0118] disabled:opacity-40 disabled:cursor-not-allowed tracking-widest"
+              disabled={hintLoading}
+              className="text-[6px] px-2 py-1 border-2 border-[#60a5fa] text-[#60a5fa] hover:bg-[#60a5fa] hover:text-[#0a0118] disabled:opacity-40 disabled:cursor-not-allowed tracking-widest transition-colors"
             >
-              {hint ? 'HINT USED' : 'HINT?'}
+              {hintLoading ? '...' : hint ? '↻ HINT' : 'HINT?'}
             </button>
           )}
         </div>

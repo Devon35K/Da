@@ -1,5 +1,72 @@
 package com.figma.wordlesmasher;
 
+import android.Manifest;
+import android.content.pm.PackageManager;
+import android.os.Bundle;
+import android.webkit.WebChromeClient;
+import android.webkit.WebView;
+import androidx.core.app.ActivityCompat;
+import androidx.core.content.ContextCompat;
 import com.getcapacitor.BridgeActivity;
+import com.getcapacitor.Plugin;
+import com.getcapacitor.PluginCall;
+import com.google.ar.core.ArCoreApk;
 
-public class MainActivity extends BridgeActivity {}
+public class MainActivity extends BridgeActivity {
+    private static final int CAMERA_PERMISSION_REQUEST_CODE = 100;
+
+    @Override
+    public void onCreate(Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+        requestCameraPermission();
+        
+        // Configure WebView for WebXR support
+        try {
+            WebView webView = this.getBridge().getWebView();
+            if (webView != null) {
+                webView.getSettings().setDomStorageEnabled(true);
+                webView.getSettings().setJavaScriptEnabled(true);
+                webView.getSettings().setMediaPlaybackRequiresUserGesture(false);
+                webView.setWebChromeClient(new WebChromeClient());
+            }
+        } catch (Exception e) {
+            // WebView configuration failed
+        }
+    }
+
+    @Override
+    public void onResume() {
+        super.onResume();
+        // ARCore Session needs to be resumed here
+        try {
+            ArCoreApk.getInstance().requestInstall(this, true);
+        } catch (Exception e) {
+            // ARCore not available
+        }
+    }
+
+    @Override
+    public void onPause() {
+        super.onPause();
+        // ARCore Session should be paused here
+    }
+
+    private void requestCameraPermission() {
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA)
+                != PackageManager.PERMISSION_GRANTED) {
+            ActivityCompat.requestPermissions(this,
+                    new String[]{Manifest.permission.CAMERA},
+                    CAMERA_PERMISSION_REQUEST_CODE);
+        }
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode == CAMERA_PERMISSION_REQUEST_CODE) {
+            if (grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+                // Permission granted
+            }
+        }
+    }
+}

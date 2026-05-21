@@ -1,5 +1,8 @@
 import { useNavigate } from 'react-router';
+import WaveMap from '../components/WaveMap';
 import { useState, useEffect, useMemo } from 'react';
+import { Capacitor } from '@capacitor/core';
+import ARPlugin from '../../plugins/ar-plugin';
 
 function seededRand(seed: number): number {
   const x = Math.sin(seed + 1) * 10000;
@@ -20,17 +23,40 @@ const SYSTEM_CHECKS: ISystemCheck[] = [
     label: 'CAMERA MODULE',
     critical: true,
     run: async () => {
-      const stream = await navigator.mediaDevices.getUserMedia({ video: true });
-      stream.getTracks().forEach(t => t.stop());
+      const isNative = Capacitor.isNativePlatform();
+      const isAndroid = Capacitor.getPlatform() === 'android';
+      
+      if (isNative && isAndroid) {
+        // Android: Skip camera check, will handle in AR plugin
+        console.log('Android detected - skipping camera check');
+        return;
+      } else {
+        // Web: Check camera access
+        const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+        stream.getTracks().forEach(t => t.stop());
+      }
     },
   },
   {
     label: 'AR PLANE DETECT',
     critical: true,
     run: async () => {
-      if (!('xr' in navigator)) throw new Error('WebXR not supported');
-      const supported = await (navigator as any).xr.isSessionSupported('immersive-ar');
-      if (!supported) throw new Error('AR not supported');
+      const isNative = Capacitor.isNativePlatform();
+      const isAndroid = Capacitor.getPlatform() === 'android';
+      console.log('AR Check - isNative:', isNative, 'isAndroid:', isAndroid);
+      
+      if (isNative && isAndroid) {
+        // Android: Skip check for now, will debug in AR page
+        console.log('Android detected - skipping AR check, will debug in AR page');
+        return;
+      } else {
+        // Web: Check WebXR support
+        console.log('Checking WebXR support...');
+        if (!('xr' in navigator)) throw new Error('WebXR not supported');
+        const supported = await (navigator as any).xr.isSessionSupported('immersive-ar');
+        console.log('WebXR supported:', supported);
+        if (!supported) throw new Error('AR not supported');
+      }
     },
   },
   {
@@ -412,6 +438,28 @@ export default function MissionPage() {
           </div>
         </div>
       </div>
+
+      {/* ── Wave Route Map ── */}
+      <WaveMap />
+
+      {/* ── Saved checkpoint indicator ── */}
+      {(() => {
+        const sv = parseInt(localStorage.getItem('arwordle.savedWave') ?? '1', 10);
+        return sv > 1 ? (
+          <div className="flex items-center justify-center gap-2 mb-2">
+            <div
+              className="text-[6px] tracking-widest border px-3 py-1"
+              style={{
+                color:           '#10b981',
+                borderColor:     '#10b98155',
+                backgroundColor: '#10b98111',
+              }}
+            >
+              ▸ CHECKPOINT: WAVE {sv}
+            </div>
+          </div>
+        ) : null;
+      })()}
 
       {/* ── Engage / Retry Button ── */}
       {criticalFailed ? (

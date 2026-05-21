@@ -113,6 +113,9 @@ importers:
       '@types/three':
         specifier: ^0.184.1
         version: 0.184.1
+      ar.js:
+        specifier: ^2.2.2
+        version: 2.2.2
       canvas-confetti:
         specifier: 1.9.4
         version: 1.9.4
@@ -1683,6 +1686,9 @@ packages:
   ansi-styles@4.3.0:
     resolution: {integrity: sha512-zbB9rCJAT1rbjiVDb2hqKFHNYLxgtk8NURxZ3IZwD3F6NtxbXZQCnnSi1Lkx+IDohdPlFp222wVALIheZJQSEg==}
     engines: {node: '>=8'}
+
+  ar.js@2.2.2:
+    resolution: {integrity: sha512-ThNE9oOGcosmMRKVkkKgHgHhDpLKXikLkFGCviAka5L3GAP3mpU1S5xJ9UWviJDncfzDfyezDCGe+bm321nyqQ==}
 
   aria-hidden@1.2.6:
     resolution: {integrity: sha512-ik3ZgC9dY/lYVVM++OISsaYDeg1tb0VtP5uL3ouh1koGOaUMDPpbFIei4JkFimWUFPn90sbMNMXQAIVOlnYKJA==}
@@ -4157,6 +4163,8 @@ snapshots:
   ansi-styles@4.3.0:
     dependencies:
       color-convert: 2.0.1
+
+  ar.js@2.2.2: {}
 
   aria-hidden@1.2.6:
     dependencies:

@@ -1,5 +1,6 @@
 {
   "appId": "com.figma.wordlesmasher",
   "appName": "AR Wordle Smasher",
-  "webDir": "dist"
+  "webDir": "dist",
+  "icon": "src/imports/iconaws.png"
 }
