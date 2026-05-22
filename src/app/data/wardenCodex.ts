@@ -3,7 +3,8 @@
 
 export const WARDEN_CODEX: readonly string[] = [
   // Combat & magic
-  'BLAZE', 'STORM', 'FROST', 'FLAME', 'SPELL
+  'BLAZE', 'STORM', 'FROST', 'FLAME', 'SPELL',
+  
   // Creatures & realms
   'GHOST', 'BEAST', 'DEMON',
   // Elements & states
