@@ -3,14 +3,11 @@
 
 export const WARDEN_CODEX: readonly string[] = [
   // Combat & magic
-  'BLAZE', 'STORM', 'FROST', 'FLAME', 'SPELL', 'MAGIC', 'WRATH', 'CRYPT',
-  'CURSE', 'POWER', 'SWORD', 'ARROW', 'ARMOR', 'BRAVE', 'QUEST', 'SHADE',
+  'BLAZE', 'STORM', 'FROST', 'FLAME', 'SPELL
   // Creatures & realms
-  'GHOST', 'BEAST', 'DEMON', 'ANGEL', 'RAVEN', 'TIGER', 'EAGLE', 'GIANT',
-  'KNAVE', 'NOBLE', 'ELDER', 'ROYAL', 'CROWN', 'RELIC', 'VAULT', 'TOTEM',
+  'GHOST', 'BEAST', 'DEMON',
   // Elements & states
-  'EARTH', 'ETHER', 'NIGHT', 'LIGHT', 'PRIDE', 'HONOR', 'VALOR', 'GLINT',
-  'DREAM', 'JEWEL', 'CRAFT', 'SCALE', 'RANGE', 'FATAL',
+  'EARTH', 'ETHER', 'NIGHT', 'LIGHT',
 ];
 
 // The boss word — completing this defeats the Rift Overlord

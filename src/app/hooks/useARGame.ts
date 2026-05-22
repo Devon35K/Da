@@ -109,6 +109,8 @@ export interface UseARGameResult {
   speedTier:            number;
   /** Trigger a dodge: plays sfxDash, grants 400 ms invulnerability, vibrates. */
   dodge:                () => void;
+  /** Restore player health to maximum. */
+  restoreHealth:        () => void;
 }
 
 // ── Tunables ─────────────────────────────────────────────────────────────────
@@ -1721,6 +1723,11 @@ export function useARGame(): UseARGameResult {
     if (hpRef.current <= 0) setPhase('game-over');
   }, []);
 
+  const restoreHealth = useCallback(() => {
+    hpRef.current = MAX_HP;
+    setHp(MAX_HP);
+  }, []);
+
   /**
    * Hide every currently-active asteroid and remove them from the active list.
    * Pending respawn timeouts are no-ops because they check `pausedRef`.
@@ -1793,5 +1800,6 @@ export function useARGame(): UseARGameResult {
     resetWaveSpeedTimer,
     speedTier,
     dodge,
+    restoreHealth,
   };
 }

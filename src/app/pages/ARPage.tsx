@@ -67,7 +67,7 @@ export default function ARPage() {
     setWaveTo, damagePlayer,
     clearActiveAsteroids, respawnWave,
     resetWaveSpeedTimer, speedTier, dodge,
-    consumeLetters,
+    consumeLetters, restoreHealth,
   } = useARGame();
 
   // Wordle hint via Django AI endpoint
@@ -82,6 +82,7 @@ export default function ARPage() {
       clearHint();
       localStorage.setItem('arwordle.savedWave', String(waveNum));
       resetWaveSpeedTimer();
+      restoreHealth();
       // Spawn fresh asteroids with a 6-second grace period before first attack.
       // Wave 1 pool was already seeded by useARGame.startGame; skip re-spawn.
       if (waveNum > 1) respawnWave(undefined, 6_000);
