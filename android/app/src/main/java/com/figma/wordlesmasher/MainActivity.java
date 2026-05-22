@@ -4,7 +4,10 @@ import android.Manifest;
 import android.content.pm.PackageManager;
 import android.os.Bundle;
 import android.graphics.Color;
+import android.graphics.PixelFormat;
 import android.view.View;
+import android.view.Window;
+import android.webkit.PermissionRequest;
 import android.webkit.WebChromeClient;
 import android.webkit.WebView;
 import androidx.core.app.ActivityCompat;
@@ -19,6 +22,10 @@ public class MainActivity extends BridgeActivity {
 
     @Override
     public void onCreate(Bundle savedInstanceState) {
+        // Register our custom ARPlugin BEFORE super.onCreate so Capacitor can find it
+        registerPlugin(ARPlugin.class);
+        // Make window transparent BEFORE super.onCreate so the GLSurfaceView camera shows through
+        getWindow().setFormat(PixelFormat.TRANSLUCENT);
         super.onCreate(savedInstanceState);
         requestCameraPermission();
 
@@ -29,7 +36,13 @@ public class MainActivity extends BridgeActivity {
                 webView.getSettings().setDomStorageEnabled(true);
                 webView.getSettings().setJavaScriptEnabled(true);
                 webView.getSettings().setMediaPlaybackRequiresUserGesture(false);
-                webView.setWebChromeClient(new WebChromeClient());
+                webView.setWebChromeClient(new WebChromeClient() {
+                    @Override
+                    public void onPermissionRequest(final PermissionRequest request) {
+                        // Auto-grant camera/microphone permission requests from getUserMedia in WebView
+                        runOnUiThread(() -> request.grant(request.getResources()));
+                    }
+                });
 
                 // Make WebView transparent so ARCore camera feed shows through
                 webView.setBackgroundColor(Color.TRANSPARENT);

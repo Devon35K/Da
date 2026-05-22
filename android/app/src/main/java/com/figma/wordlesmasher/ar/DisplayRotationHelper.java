@@ -7,17 +7,6 @@ import android.view.WindowManager;
 
 import com.google.ar.core.Session;
 
-/**
- * Tracks the current display rotation and surface size and pushes them into
- * the ARCore Session via {@code Session.setDisplayGeometry(...)} when needed.
- *
- * Lifecycle:
- *   - {@link #onResume()} / {@link #onPause()} register/unregister a
- *     DisplayListener for orientation changes.
- *   - {@link #onSurfaceChanged(int, int)} from the GLSurfaceView callback.
- *   - {@link #updateSessionIfNeeded(Session)} on the GL thread before each
- *     {@code session.update()}.
- */
 public class DisplayRotationHelper implements DisplayManager.DisplayListener {
     private boolean viewportChanged;
     private int viewportWidth;

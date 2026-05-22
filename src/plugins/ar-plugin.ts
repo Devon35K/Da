@@ -6,16 +6,15 @@ export interface ARPluginPlugin {
   checkCameraPermission(): Promise<{ granted: boolean }>;
   startARSession(): Promise<{ started: boolean; error?: string }>;
   stopARSession(): Promise<{ stopped: boolean; error?: string }>;
-  hitTest(x: number, y: number): Promise<{ found: boolean; pose?: { tx: number; ty: number; tz: number; qx: number; qy: number; qz: number; qw: number }; error?: string }>;
-  addListener(eventName: 'arFrame', listenerFunc: (data: ARFrameData) => void): Promise<void>;
-  removeListener(eventName: 'arFrame', listenerFunc: (data: ARFrameData) => void): Promise<void>;
+  addListener(eventName: string, listenerFunc: any): Promise<void>;
+  removeListener(eventName: string, listenerFunc: any): Promise<void>;
   removeAllListeners(): Promise<void>;
 }
 
 export interface ARFrameData {
-  projectionMatrix: number[];        // 16 floats, column-major
-  viewMatrix: number[];             // 16 floats, column-major
-  cameraPosition: number[];         // 3 floats [x, y, z]
+  projectionMatrix: number[];
+  viewMatrix: number[];
+  cameraPosition: number[];
   cameraTracking: boolean;
   lightIntensity: number;
   planes: ARPlane[];
@@ -23,12 +22,12 @@ export interface ARFrameData {
 
 export interface ARPlane {
   id: number;
-  orientation: string;              // 'HORIZONTAL_UPWARD_FACING', 'VERTICAL', etc.
+  orientation: string;
   centerX: number;
   centerY: number;
   centerZ: number;
-  poseMatrix: number[];             // 16 floats, column-major transform
-  polygonXZ: number[];              // flat array [x0, z0, x1, z1, ...] in plane-local space
+  poseMatrix: number[];
+  polygonXZ: number[];
 }
 
 const ARPlugin = registerPlugin<ARPluginPlugin>('ARPlugin');

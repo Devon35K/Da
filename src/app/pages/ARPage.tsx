@@ -9,7 +9,6 @@ import CelebrationModal, { type CelebrationKind } from '../components/Celebratio
 import { fetchTaunt } from '../services/bossApi';
 import WaveMap from '../components/WaveMap';
 import { useScores } from '../hooks/useScores';
-import ARPlugin from '../../plugins/ar-plugin';
 
 interface CelebrationData {
   kind:         CelebrationKind;
@@ -130,14 +129,20 @@ export default function ARPage() {
 
   // ── Check AR support on native Android to enable virtual mode fallback ──
   useEffect(() => {
+    // WebXR is used for all platforms now - no native plugin needed
     if (Capacitor.isNativePlatform() && Capacitor.getPlatform() === 'android') {
-      ARPlugin.checkARSupport().then(result => {
-        if (!result.supported) {
+      // Check WebXR support instead
+      if ('xr' in navigator && (navigator as any).xr?.isSessionSupported) {
+        (navigator as any).xr.isSessionSupported('immersive-ar').then((supported: boolean) => {
+          if (!supported) {
+            setIsVirtualMode(true);
+          }
+        }).catch(() => {
           setIsVirtualMode(true);
-        }
-      }).catch(() => {
+        });
+      } else {
         setIsVirtualMode(true);
-      });
+      }
     }
   }, []);
 

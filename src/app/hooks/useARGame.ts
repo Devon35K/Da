@@ -8,6 +8,7 @@ import {
 import { safeVibrate } from './useSettings';
 import { sfxDestroy, sfxDash, sfxDamage } from '../utils/sfx';
 import ARPlugin, { ARFrameData } from '../../plugins/ar-plugin';
+// WebXR is used directly - mock plugin prevents errors
 // GLB assets — Vite resolves these to URL strings at build time
 import asteroidUrl          from '../../3dmodel/asteroid.glb?url';
 import asteroid01Url        from '../../3dmodel/asteroid_01.glb?url';
@@ -210,6 +211,8 @@ export function useARGame(): UseARGameResult {
   const originLockedRef     = useRef(false);
   const raycasterRef        = useRef(new THREE.Raycaster());
   const canvasRef           = useRef<HTMLCanvasElement | null>(null);
+  const videoRef            = useRef<HTMLVideoElement | null>(null);
+  const cameraStreamRef     = useRef<MediaStream | null>(null);
   const camPosRef           = useRef(new THREE.Vector3());
   /** When the scanning phase started, in performance.now() ms. Used to time out plane detection. */
   const scanStartedAtRef    = useRef<number>(0);
@@ -1155,6 +1158,23 @@ export function useARGame(): UseARGameResult {
       ARPlugin.removeListener('arFrame', arFrameListenerRef.current).catch(console.error);
       arFrameListenerRef.current = null;
     }
+    // Device orientation listener cleanup
+    if ((stopAR as any)._orientCleanup) {
+      (stopAR as any)._orientCleanup();
+      (stopAR as any)._orientCleanup = null;
+    }
+    if (isNativeARModeRef.current) {
+      ARPlugin.stopARSession().catch(console.error);
+    }
+    // Stop camera stream and remove video element
+    if (cameraStreamRef.current) {
+      cameraStreamRef.current.getTracks().forEach(t => t.stop());
+      cameraStreamRef.current = null;
+    }
+    if (videoRef.current) {
+      videoRef.current.remove();
+      videoRef.current = null;
+    }
     isNativeARModeRef.current = false;
     latestARFrameRef.current = null;
   }, [handleTap]);
@@ -1482,30 +1502,73 @@ export function useARGame(): UseARGameResult {
 
       // ── Branch: Native ARCore (Android) vs WebXR (Web) ────────────────────────
       if (useNativeAR) {
-        // Native ARCore path: camera feed is rendered by native GLSurfaceView,
-        // we just render 3D content on top using matrices from arFrame events.
+        // Native Android path: render camera feed via getUserMedia <video> behind
+        // the Three.js canvas, with the canvas rendering 3D content on top.
         isNativeARModeRef.current = true;
-        renderer.xr.enabled = false;  // No WebXR needed
+        renderer.xr.enabled = false;
 
-        // Listen to arFrame events from ARPlugin
-        arFrameListenerRef.current = (data: ARFrameData) => {
-          latestARFrameRef.current = data;
+        // ── 1. Create the camera <video> element behind the canvas ─────────────
+        console.log('[AR] Requesting camera via getUserMedia...');
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia({
+            video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } },
+            audio: false,
+          });
+          console.log('[AR] Camera stream obtained:', stream.getVideoTracks()[0]?.label);
+          cameraStreamRef.current = stream;
 
-          // Apply ARCore matrices to Three.js camera
-          const proj = new THREE.Matrix4().fromArray(data.projectionMatrix);
-          const view = new THREE.Matrix4().fromArray(data.viewMatrix);
-          camera.projectionMatrix.copy(proj);
-          camera.matrixWorldInverse.copy(view);
-          camera.matrix.copy(camera.matrixWorldInverse).invert();
-          camera.matrixAutoUpdate = false;
+          const video = document.createElement('video');
+          video.srcObject = stream;
+          video.autoplay = true;
+          video.playsInline = true;
+          video.muted = true;
+          video.style.cssText = 'position:fixed;inset:0;width:100%;height:100%;object-fit:cover;z-index:0;pointer-events:none;';
+          document.body.appendChild(video);
+          videoRef.current = video;
+          await video.play().catch(() => {});
+        } catch (camErr) {
+          console.error('Camera access failed:', camErr);
+          throw new Error('Camera permission denied or unavailable');
+        }
 
-          // Update camera position for asteroid AI
-          camPosRef.current.set(data.cameraPosition[0], data.cameraPosition[1], data.cameraPosition[2]);
+        // ── 2. Start ARCore session (no-op stub; we use device orientation instead) ─
+        await ARPlugin.startARSession().catch(() => {});
 
-          // Track planes from ARCore
-          updateNativePlaneTracking(data);
+        // ── 3. Device orientation → Three.js camera rotation ───────────────────
+        // Camera stays at origin (0,0,0); we just rotate it based on gyroscope.
+        // Three.js cameras look down -Z by default.
+        camera.position.set(0, 0, 0);
+        camera.matrixAutoUpdate = true;
+
+        const deviceEuler = new THREE.Euler();
+        const screenAdjust = new THREE.Quaternion(-Math.sqrt(0.5), 0, 0, Math.sqrt(0.5)); // -π/2 around X
+        const worldAdjust = new THREE.Quaternion();
+
+        const onOrient = (ev: DeviceOrientationEvent) => {
+          if (ev.alpha == null || ev.beta == null || ev.gamma == null) return;
+          // Convert device orientation (degrees) to radians (YXZ Euler order is standard)
+          const alpha = THREE.MathUtils.degToRad(ev.alpha);  // Z (compass)
+          const beta  = THREE.MathUtils.degToRad(ev.beta);   // X (front/back tilt)
+          const gamma = THREE.MathUtils.degToRad(ev.gamma);  // Y (left/right tilt)
+          const orient = THREE.MathUtils.degToRad(window.screen?.orientation?.angle ?? 0);
+
+          deviceEuler.set(beta, alpha, -gamma, 'YXZ');
+          camera.quaternion.setFromEuler(deviceEuler);
+          camera.quaternion.multiply(screenAdjust);           // align with viewport
+          worldAdjust.setFromAxisAngle(new THREE.Vector3(0, 0, 1), -orient);
+          camera.quaternion.multiply(worldAdjust);
         };
-        await ARPlugin.addListener('arFrame', arFrameListenerRef.current);
+
+        // iOS 13+ requires permission, but Android grants by default
+        const reqPerm = (DeviceOrientationEvent as any).requestPermission;
+        if (typeof reqPerm === 'function') {
+          reqPerm().then((s: string) => {
+            if (s === 'granted') window.addEventListener('deviceorientation', onOrient);
+          }).catch(() => window.addEventListener('deviceorientation', onOrient));
+        } else {
+          window.addEventListener('deviceorientation', onOrient);
+        }
+        (stopAR as any)._orientCleanup = () => window.removeEventListener('deviceorientation', onOrient);
 
         setPhase('scanning');
         scanStartedAtRef.current = performance.now();
@@ -1521,6 +1584,21 @@ export function useARGame(): UseARGameResult {
           const dt = now - lastTime;
           lastTime = now;
           frameCountRef.current++;
+
+          // No-plane fallback (after 1.5s, place virtual surface 1.4m in front of camera)
+          if (
+            phaseRef.current === 'scanning' &&
+            !originLockedRef.current &&
+            !noPlaneFallbackRef.current &&
+            performance.now() - scanStartedAtRef.current > 1500
+          ) {
+            const camPos = camPosRef.current;
+            const origin = new THREE.Vector3(camPos.x, camPos.y - 0.5, camPos.z - 1.4);
+            worldOriginRef.current = origin;
+            noPlaneFallbackRef.current = true;
+            console.log('[AR] No plane detected — using virtual surface');
+            setPhase('plane-found');
+          }
 
           // Game physics + AI
           if (phaseRef.current === 'playing' && !pausedRef.current) {

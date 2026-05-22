@@ -223,7 +223,49 @@ The APK will be at `android/app/build/outputs/apk/debug/app-debug.apk`
 - Native plane detection with higher accuracy and performance
 - Camera background rendered via OpenGL ES behind transparent WebView
 - Requires native Android compilation
-- **Status:** Currently has compilation errors (see Troubleshooting)
+- **Status:** ✅ Fixed and functional (API compatibility issues resolved)
+
+### AR Implementation Strategy
+
+This project uses a hybrid AR approach:
+
+**WebXR (Primary)**
+- Cross-platform AR that works in browsers
+- Unified API for both Android and iOS
+- No native compilation required
+- Used for web deployment and testing
+
+**ARCore (Android Native)**
+- Higher performance and accuracy on Android devices
+- Native plane detection and tracking
+- Used for production Android APK builds
+- Requires native Android compilation
+
+### Unity ARFoundation vs. This Project
+
+Unity's ARFoundation provides a unified API for ARCore (Android) and ARKit (iOS). This project achieves similar goals through:
+
+- **WebXR** for cross-platform compatibility (works on Android browsers and iOS Safari)
+- **Custom Capacitor plugin** for native Android ARCore integration
+- **Three.js** for 3D rendering and scene management
+
+### Future AR Enhancements
+
+Consider these alternatives for more Unity-like AR functionality:
+
+**Capacitor AR Plugins:**
+- `@capacitor-community/ar` - Community AR plugin with cross-platform support
+- `@capacitor-ml-kit` - Google ML Kit for computer vision features
+- Custom plugins can extend the current ARPlugin with more features
+
+**WebXR Improvements:**
+- Add WebXR hit-test support for object placement
+- Implement WebXR anchors for persistent AR content
+- Add WebXR light estimation for realistic rendering
+
+**Cross-Platform Native AR:**
+- Consider React Native + AR packages (react-native-vision-camera, react-native-ar)
+- Evaluate Expo AR modules for unified mobile development
 
 ### Setting up Android Development Environment
 
@@ -343,14 +385,12 @@ The `ARPlugin.java` file provides native AR functionality that bridges JavaScrip
 - **Hit Testing** - Provides tap-to-place functionality for object placement
 - **Light Estimation** - Captures environmental light intensity for realistic rendering
 
-**Current Issues:**
-The plugin has compilation errors due to API incompatibilities:
-- Line 234-235: `PluginCall.getNumber()` method not available in Capacitor 8
-- Line 342: `plane.getPolygon()` returns `FloatBuffer` instead of `Point[]`
-- Line 345-346: `Point` class doesn't have `x` and `z` fields
-
-**Workaround:**
-Use the web-based WebXR implementation which is fully functional and works on Android browsers.
+**API Fixes Applied:**
+The plugin has been updated to fix Capacitor 8 API compatibility issues:
+- Fixed `PluginCall.getNumber()` → `PluginCall.getFloat()` for float parameters
+- Fixed `plane.getPolygon()` to correctly handle `FloatBuffer` return type
+- Removed incorrect `Point` class usage; polygon vertices read directly from FloatBuffer
+- Added proper buffer rewinding before reading polygon data
 
 ### Capacitor Configuration
 
@@ -380,14 +420,48 @@ Use the web-based WebXR implementation which is fully functional and works on An
 2. Grant camera and storage permissions
 3. ARCore will automatically download if not installed
 4. Point camera at a flat surface to detect planes
-5. Note: Currently non-functional due to compilation errors
+5. Note: Fully functional with API fixes applied
 
 ### Debugging Android Issues
 
+**Install APK on Phone:**
+```bash
+# Install the debug APK via ADB
+adb install android/app/build/outputs/apk/debug/app-debug.apk
+
+# Or transfer the APK file to your phone and install directly:
+# Location: android/app/build/outputs/apk/debug/app-debug.apk
+```
+
+**Enable USB Debugging on Phone:**
+1. Go to Settings > About Phone
+2. Tap "Build Number" 7 times to enable Developer Options
+3. Go to Settings > Developer Options
+4. Enable "USB Debugging"
+5. Connect phone via USB and accept debugging prompt on phone
+
 **View ADB Logs:**
 ```bash
+# View all logs
+adb logcat
+
+# Filter for specific tags
 adb logcat | findstr "ARPlugin Capacitor"
+
+# Filter for errors only
+adb logcat *:E
+
+# Save logs to file
+adb logcat > debug.log
 ```
+
+**Debug with Android Studio:**
+1. Open Android Studio
+2. Open the `android` folder as a project
+3. Connect your phone via USB
+4. Click the "Logcat" tab at the bottom
+5. Select your device from the dropdown
+6. Filter by package name: `com.figma.wordlesmasher`
 
 **Check Capacitor Sync:**
 ```bash
@@ -436,7 +510,7 @@ android/app/build/outputs/apk/release/app-release.apk
 | **Battery Usage** | Higher | Optimized |
 | **Setup** | No installation required | Requires APK installation |
 | **Updates** | Instant (web) | Requires app update |
-| **Status** | ✅ Fully functional | ❌ Compilation errors |
+| **Status** | ✅ Fully functional | ✅ Fixed and functional |
 
 ---
 
@@ -588,11 +662,6 @@ Response: Top 10 highest scores
 - Set ANDROID_HOME environment variable
 - Ensure Android SDK is installed
 - Run `npx cap sync android` before building
-
-**ARPlugin compilation errors**
-- Currently has API compatibility issues with Capacitor 8
-- Use WebXR (web-based AR) as fallback
-- See ARPlugin.java lines 234-235, 342-346 for specific errors
 
 ---
 

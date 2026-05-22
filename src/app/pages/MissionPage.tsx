@@ -2,7 +2,6 @@ import { useNavigate } from 'react-router';
 import WaveMap from '../components/WaveMap';
 import { useState, useEffect, useMemo } from 'react';
 import { Capacitor } from '@capacitor/core';
-import ARPlugin from '../../plugins/ar-plugin';
 
 function seededRand(seed: number): number {
   const x = Math.sin(seed + 1) * 10000;
